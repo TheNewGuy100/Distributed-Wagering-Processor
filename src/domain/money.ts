@@ -9,6 +9,9 @@ const MAX_MINOR = 10n ** 18n - 1n;
 /**
  * Immutable monetary amount. Stored as integer minor units (bigint) so floating
  * point is never involved. Always non-negative; a result that would go negative throws.
+ *
+ * There is deliberately no `negate()` or `isNegative()`: a negative Money cannot exist, so "the balance went negative"
+ * is not a state this type can represent. Direction lives in the ledger (`CREDIT` / `DEBIT`), amounts stay positive.
  */
 export class Money {
   private constructor(
@@ -36,6 +39,11 @@ export class Money {
     return Money.fromMinor(BigInt(m[1]!) * 100n + BigInt(m[2]!), currency);
   }
 
+  /** Builds a Money from its wire form `{ amount: "10.00", currency: "BRL" }` (the challenge's `MoneyProps`). */
+  static from(props: { amount: unknown; currency: string }): Money {
+    return Money.parse(props.amount, props.currency);
+  }
+
   static zero(currency: string): Money {
     return Money.fromMinor(0n, currency);
   }
@@ -58,7 +66,11 @@ export class Money {
     return this.currency === other.currency && this.minor === other.minor;
   }
 
-  lessThan(other: Money): boolean {
+  isPositive(): boolean {
+    return this.minor > 0n;
+  }
+
+  isLessThan(other: Money): boolean {
     this.assertSameCurrency(other);
     return this.minor < other.minor;
   }

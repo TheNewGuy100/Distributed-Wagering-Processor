@@ -7,6 +7,8 @@ import { WagerTransaction } from '../../infrastructure/persistence/entities';
 import { insertIgnoringConflict } from '../../infrastructure/persistence/orm-helpers';
 import { lockWalletById } from '../../infrastructure/persistence/wallet-repository';
 import { FailureCode } from '../../domain/errors';
+import { WagerTransactionFailed } from '../../domain/events';
+import { enqueueEvents } from '../../infrastructure/outbox/outbox-writer';
 import { assertTransition } from '../../domain/wager-transaction';
 import type { Wallet } from '../../domain/wallet';
 import { ApplicationError, IdempotencyConflictError, ValidationError, WalletNotFoundError } from '../errors';
@@ -186,15 +188,16 @@ export class ProcessWagerTransaction {
    * change. A resend of the same request reopens it (see `reopen`). Best effort and idempotent.
    */
   async recordFailed(cmd: ProcessWagerCommand): Promise<boolean> {
+    const transactionId = randomUUID();
     const recorded = await this.em.fork().transactional(async (tx) => {
       const wallet = await lockWalletById(tx, cmd.walletId); // wallet first, as everywhere (null: it never existed)
       const own = wallet && wallet.playerId === cmd.playerId ? wallet : null;
       const now = new Date();
-      return insertIgnoringConflict(
+      const inserted = await insertIgnoringConflict(
         tx,
         WagerTransaction,
         {
-          id: randomUUID(),
+          id: transactionId,
           providerId: cmd.providerId,
           externalTransactionId: cmd.externalTransactionId,
           idempotencyKey: cmd.idempotencyKey,
@@ -215,6 +218,23 @@ export class ProcessWagerTransaction {
         },
         'id',
       );
+      if (inserted) {
+        // Atomic with the FAILED row, like every other event: the provider's downstream sees the give-up too.
+        await enqueueEvents(tx, [
+          new WagerTransactionFailed(transactionId, {
+            transactionId,
+            providerId: cmd.providerId,
+            externalTransactionId: cmd.externalTransactionId,
+            kind: cmd.kind,
+            walletId: own?.id ?? null,
+            roundId: cmd.roundId,
+            gameId: cmd.gameId,
+            money: { amount: cmd.amount.toString(), currency: cmd.currency },
+            failureCode: FailureCode.ProcessingFailed,
+          }),
+        ]);
+      }
+      return inserted;
     });
     if (recorded) this.metrics.inc('wager_transactions_total', { kind: cmd.kind, status: 'FAILED', source: 'sqs' });
     return recorded;

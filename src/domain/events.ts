@@ -58,6 +58,15 @@ export class WagerTransactionRejected extends DomainEvent<TxData & { failureCode
   readonly version = 1;
 }
 
+/**
+ * Processing was given up on for technical reasons (no balance change). NOT final: a resend of the same request
+ * reopens the transaction, and a Processed or Rejected event of the same aggregate follows.
+ */
+export class WagerTransactionFailed extends DomainEvent<TxData & { failureCode: string }> {
+  readonly eventType = 'WagerTransactionFailed';
+  readonly version = 1;
+}
+
 export class WagerTransactionPendingReference extends DomainEvent<TxData & { referenceExternalId: string | null }> {
   readonly eventType = 'WagerTransactionPendingReference';
   readonly version = 1;

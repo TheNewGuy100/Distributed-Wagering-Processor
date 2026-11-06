@@ -49,9 +49,16 @@ describe('EventStore', () => {
     const s = new EventStore();
     expect(s.ingest('1', balanceChanged('w1', 1)).outOfOrder).toBeUndefined();
     expect(s.ingest('2', balanceChanged('w1', 2)).outOfOrder).toBeUndefined();
-    expect(s.ingest('3', balanceChanged('w1', 5)).outOfOrder).toBeUndefined(); // gap: other events not consumed yet
-    expect(s.ingest('4', balanceChanged('w1', 4)).outOfOrder).toBe(true); // went backwards
-    expect(s.ingest('5', balanceChanged('w1', 5)).outOfOrder).toBe(true); // repeated version, new event id
+    const jump = s.ingest('3', balanceChanged('w1', 5));
+    expect(jump.outOfOrder).toBeUndefined();
+    expect(jump.gap).toEqual({ from: 3, to: 4 }); // a gap, not an error: 3 and 4 may be late or DEAD
+    expect(s.stats.openGaps).toBe(2);
+    const late = s.ingest('4', balanceChanged('w1', 4));
+    expect(late.outOfOrder).toBeUndefined();
+    expect(late.lateFill).toBe(true); // it was one of the missing ones
+    expect(s.stats.openGaps).toBe(1); // version 3 never came (a DEAD event): reported, tolerated
+    expect(s.ingest('5', balanceChanged('w1', 4)).outOfOrder).toBe(true); // a version that was already filled
+    expect(s.ingest('5b', balanceChanged('w1', 5)).outOfOrder).toBe(true); // repeated version, new event id
     expect(s.ingest('6', balanceChanged('w2', 1)).outOfOrder).toBeUndefined(); // another wallet has its own sequence
     expect(s.stats.outOfOrder).toBe(2);
   });

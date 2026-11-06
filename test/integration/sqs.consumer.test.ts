@@ -261,7 +261,20 @@ describe('SQS consumer', () => {
       messageId: 'x',
       body: JSON.stringify(envelope(cmd)),
     });
-    expect(await txByExternal(cmd.externalTransactionId)).toMatchObject({ status: 'FAILED', walletId: w.walletId });
+    const failed = await txByExternal(cmd.externalTransactionId);
+    expect(failed).toMatchObject({ status: 'FAILED', walletId: w.walletId });
+    // the give-up is announced like every other outcome (outbox row written with the FAILED row)
+    const ev = await t.orm.em.fork().execute<{ payload: any }[]>(
+      "select payload from outbox_events where event_type = 'WagerTransactionFailed' and aggregate_id = ?",
+      [failed.transactionId],
+    );
+    expect(ev).toHaveLength(1);
+    expect(ev[0]!.payload.data).toMatchObject({
+      transactionId: failed.transactionId,
+      failureCode: 'PROCESSING_FAILED',
+      gameId: 'fortune-chimp',
+      money: { amount: '10.00', currency: 'BRL' },
+    });
     expect(await expectLedgerConsistent(t, w.walletId)).toEqual({ balance: '100.00', entries: 1 });
 
     const headers = { 'idempotency-key': `${cmd.providerId}:${cmd.externalTransactionId}` };

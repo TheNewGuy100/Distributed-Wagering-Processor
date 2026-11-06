@@ -48,8 +48,23 @@ describe('Money', () => {
     const usd = Money.parse('1.00', 'USD');
     expect(() => brl.add(usd)).toThrow(CurrencyMismatchError);
     expect(() => brl.subtract(usd)).toThrow(CurrencyMismatchError);
-    expect(() => brl.lessThan(usd)).toThrow(CurrencyMismatchError);
+    expect(() => brl.isLessThan(usd)).toThrow(CurrencyMismatchError);
     expect(brl.equals(usd)).toBe(false);
+  });
+
+  test('builds from its wire form and compares', () => {
+    const m = Money.from({ amount: '10.00', currency: 'BRL' });
+    expect(m.toJSON()).toEqual({ amount: '10.00', currency: 'BRL' });
+    expect(() => Money.from({ amount: 10, currency: 'BRL' })).toThrow(InvalidMoneyError);
+    expect(m.isPositive()).toBe(true);
+    expect(Money.zero('BRL').isPositive()).toBe(false);
+    expect(Money.parse('1.00', 'BRL').isLessThan(m)).toBe(true);
+  });
+
+  test('has no negative state to represent', () => {
+    expect('negate' in Money.prototype).toBe(false);
+    expect('isNegative' in Money.prototype).toBe(false);
+    expect(() => Money.fromMinor(-1n, 'BRL')).toThrow(InvalidMoneyError);
   });
 
   test('is immutable', () => {

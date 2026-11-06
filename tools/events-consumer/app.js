@@ -23,6 +23,7 @@ const TILES = [
   { id: 'duplicates', label: 'duplicates dropped' },
   { id: 'invalid', label: 'invalid messages', bad: true },
   { id: 'outOfOrder', label: 'out-of-order versions', bad: true },
+  { id: 'openGaps', label: 'missing versions (gaps)', bad: true },
 ];
 const tileEls = {};
 for (const t of TILES) {
@@ -40,6 +41,7 @@ function summary(e) {
   const d = e.data ?? {};
   if (e.eventType === 'WalletBalanceChanged') return `${d.direction} ${d.money?.amount} (${d.balanceBefore?.amount} → ${d.balanceAfter?.amount}, wallet v${d.walletVersion})`;
   if (e.eventType === 'WagerTransactionRejected') return `${d.kind} ${d.money?.amount} rejected: ${d.failureCode}`;
+  if (e.eventType === 'WagerTransactionFailed') return `${d.kind} ${d.money?.amount} FAILED (${d.failureCode}); a resend may reopen it`;
   if (d.kind) return `${d.kind} ${d.money?.amount ?? ''} ${d.money?.currency ?? ''}${d.gameId ? ' · ' + d.gameId : ''}`.trim();
   return e.reason ?? '';
 }
@@ -48,6 +50,8 @@ function row(e) {
   const tags = [];
   tags.push(h('span', { class: 'tag ' + (e.status === 'duplicate' ? 'dup' : e.status === 'invalid' ? 'bad' : 'new'), text: e.status }));
   if (e.outOfOrder) tags.push(h('span', { class: 'tag bad', text: 'out of order' }));
+  if (e.gap) tags.push(h('span', { class: 'tag bad', text: `gap v${e.gap.from}–v${e.gap.to}` }));
+  if (e.lateFill) tags.push(h('span', { class: 'tag', text: 'late, filled a gap' }));
   return h(
     'details',
     {},

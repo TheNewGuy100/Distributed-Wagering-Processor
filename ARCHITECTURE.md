@@ -142,6 +142,10 @@ truncating the ledger, a negative balance and a second reversal are all rejected
 Money is `NUMERIC(18,2)` in SQL and `bigint` minor units in code (`Money`): immutable, non-negative, strict
 `"10.00"` parsing (no floats, signs or exponents), single-currency arithmetic enforced (mixing currencies throws).
 Currency is a field of every amount, so multi-currency needs no model change (one wallet per player and currency).
+The API follows the challenge's skeleton where it fits (`Money.from({amount, currency})`, `isPositive`, `isLessThan`, `add`,
+`subtract`) with one deliberate difference: there is no `negate()`/`isNegative()`, because a negative `Money` cannot be
+constructed at all. That makes "the balance went negative" unrepresentable in the domain, on top of the database `CHECK`.
+Direction lives in the ledger (`CREDIT`/`DEBIT`) and amounts stay positive.
 
 `LOSS` and rejected transactions produce no ledger entry. `version` increments only when the balance changes, and
 therefore equals the number of ledger entries; reconciliation checks that too.
@@ -242,9 +246,11 @@ whose retries ran out. It has no ledger entry and does not change the balance, b
 state instead of "unknown" (`REJECTED` stays reserved for business verdicts). `FAILED` is a resting state, not a final
 one: a resend of the very same request (same `Idempotency-Key`, same payload) reopens it (`FAILED → PENDING`) and runs
 it from scratch, under the wallet lock, so it is applied exactly once; the same key with another payload is a 409 as always.
-HTTP never produces it: a failing request answers 4xx/503 and the provider resends. No event is published for it.
+HTTP never produces it: a failing request answers 4xx/503 and the provider resends. It is announced by
+`WagerTransactionFailed` (written to the outbox in the same transaction as the `FAILED` row); that event is *not* final
+either, a `Processed` or `Rejected` event of the same transaction follows if the request is reopened.
 
-Events (`WagerTransactionProcessed`, `WagerTransactionRejected`, `WagerTransactionPendingReference`,
+Events (`WagerTransactionProcessed`, `WagerTransactionRejected`, `WagerTransactionPendingReference`, `WagerTransactionFailed`,
 `WalletBalanceChanged`) are rows in `outbox_events`, inserted in the same transaction as the change; nothing is
 published before commit, because only committed rows are visible to the publisher.
 
@@ -377,7 +383,8 @@ name in the catalog **and** by behaviour, every migration reversible, no entity/
   order, so hot wallets are the slowest to drain. More publisher instances help across wallets, not within one.
 * **Outbox head-of-line blocking**: an event the broker refuses holds back the later events of the same wallet while
   it backs off (that is what keeps the order). After `OUTBOX_MAX_ATTEMPTS` it goes `DEAD` and the wallet moves on, so
-  consumers must be able to tolerate a gap in `walletVersion`. Alert on `outbox_lag_seconds`, `outbox_publish_failures_total`
+  consumers must be able to tolerate a gap in `walletVersion` (the example consumer in `tools/events-consumer` does: a skipped
+  version is reported as a gap, filled in if it arrives late, and only a repeated version counts as out of order). Alert on `outbox_lag_seconds`, `outbox_publish_failures_total`
   and `outbox_dead_events`.
 * **Clock skew**: pending-reference retry times are computed with the application clock and compared with the database
   clock; instances with noticeably skewed clocks delay or advance those retries (not correctness). Outbox retries use the

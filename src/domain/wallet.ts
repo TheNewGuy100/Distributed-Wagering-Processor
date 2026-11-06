@@ -68,7 +68,7 @@ export class Wallet {
   }
 
   canDebit(amount: Money): boolean {
-    return amount.currency === this.currency && !this._balance.lessThan(amount);
+    return amount.currency === this.currency && !this._balance.isLessThan(amount);
   }
 
   credit(transactionId: string, amount: Money): LedgerEntryDraft {
