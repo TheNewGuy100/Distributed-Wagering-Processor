@@ -47,6 +47,8 @@ export interface SettleInput {
 export interface SettleOutcome {
   status: TransactionStatus;
   failureCode: string | null;
+  /** The request's game, or the referenced transaction's when a reversal came without one. */
+  gameId: string | null;
   /** Wallet balance after this settlement (unchanged for rejections and pending references). */
   balance: Money;
   /** Final values of the row, so callers can build the response without reading it back. */
@@ -74,6 +76,7 @@ export async function loadReference(
     walletId: row.wallet ?? '',
     currency: row.currency,
     roundId: row.roundId ?? null,
+    gameId: row.gameId ?? null,
     kind: row.kind as TransactionKind,
     status: row.status as TransactionStatus,
     amount: Money.parse(row.amount, row.currency),
@@ -113,6 +116,8 @@ export async function settleTransaction(
     }
   }
 
+  // A reversal inherits the game of the transaction it reverses, so per-game reports do not undercount.
+  const gameId = s.gameId ?? reference?.gameId ?? null;
   const base = {
     transactionId: s.transactionId,
     providerId: s.providerId,
@@ -120,7 +125,7 @@ export async function settleTransaction(
     kind: s.kind,
     walletId: wallet.id,
     roundId: s.roundId,
-    gameId: s.gameId,
+    gameId,
     money: { amount: s.amount.toString(), currency: s.currency },
   };
 
@@ -146,6 +151,7 @@ export async function settleTransaction(
     return {
       status: 'PENDING_REFERENCE',
       failureCode: null,
+      gameId,
       balance: wallet.balance,
       retryCount: retry.retryCount,
       nextRetryAt: retry.at,
@@ -169,6 +175,7 @@ export async function settleTransaction(
       failureCode,
       nextRetryAt: null,
       balanceAfter: wallet.balance.toString(),
+      ...(gameId !== s.gameId ? { gameId } : {}),
       referenceTransaction: processed ? (reference?.id ?? null) : null,
       updatedAt,
     },
@@ -195,5 +202,5 @@ export async function settleTransaction(
   }
   await enqueueEvents(tx, events);
 
-  return { status, failureCode, balance: wallet.balance, retryCount: s.retryCount, nextRetryAt: null, updatedAt };
+  return { status, failureCode, gameId, balance: wallet.balance, retryCount: s.retryCount, nextRetryAt: null, updatedAt };
 }

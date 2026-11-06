@@ -233,6 +233,14 @@ timestamp would be the transaction *start* time and could invert). A row is only
 row of the same aggregate exists, so concurrent publishers never overtake each other within a wallet; the SQS message
 group is the aggregate id. `WalletBalanceChanged` also carries `walletVersion` so a consumer can reorder or detect gaps.
 
+**Observed balance of a pending reversal.** `balance_after` is rewritten every time the transaction is evaluated, so while it is
+`PENDING_REFERENCE` a replay returns the balance seen at the latest attempt, and once resolved it returns the balance
+observed at resolution (the moment the reversal actually changed, or failed to change, the wallet). That is the only
+place where "the balance at the time" moves.
+
+**Game of a reversal.** `gameId` is optional on `REFUND`/`ROLLBACK`; when absent it is copied from the referenced
+transaction at settlement, so per-game reports include reversals.
+
 Events are an abstract `DomainEvent` envelope (`eventId`, `eventType`, `version`, `aggregateId`, `correlationId`,
 `causationId`, `occurredAt`, `data`) with typed subclasses. `correlationId` is the request's (or message's) and ties all
 events of one operation together; `causationId` is the queue `messageId` when there is one, otherwise the transaction.

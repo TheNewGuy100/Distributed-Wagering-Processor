@@ -26,6 +26,7 @@ export interface ReferenceSnapshot {
   walletId: string;
   currency: string;
   roundId: string | null;
+  gameId?: string | null;
   kind: TransactionKind;
   status: TransactionStatus;
   amount: Money;

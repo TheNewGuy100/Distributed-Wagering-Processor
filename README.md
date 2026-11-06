@@ -84,6 +84,10 @@ curl -s -X POST localhost:3000/wagering/transactions -H 'content-type: applicati
   -d '{"providerId":"acme","externalTransactionId":"bet-1","playerId":"p1","walletId":"<walletId>","roundId":"r1","gameId":"fortune-chimp","kind":"BET","money":{"amount":"10.00","currency":"BRL"}}'
 ```
 
+> **Upgrading from an earlier checkout:** the initial migration was edited in place (new `game_id`, `balance_after`,
+> `balance_before` columns) because nothing was deployed. Recreate an existing local database with
+> `docker compose down -v`.
+
 ## Commands
 
 | Command | What it does |

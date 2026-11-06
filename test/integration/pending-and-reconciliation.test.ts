@@ -63,9 +63,13 @@ describe('pending reference worker', () => {
       }, 10000, 'worker reschedule');
       expect(waiting.status).toBe('PENDING_REFERENCE');
 
-      expect((await wager(t, w, { externalTransactionId: betExt, amount: '10.00' })).status).toBe(201);
+      const game = uid('game');
+      expect((await wager(t, w, { externalTransactionId: betExt, amount: '10.00', gameId: game })).status).toBe(201);
       const done = await waitFor(terminal(refund.body.transactionId), 15000, 'refund resolution');
       expect(done.status).toBe('PROCESSED');
+      // the reversal had no gameId of its own: it inherits the game of the bet it reverses (per-game reports)
+      const view = await api(t, 'GET', `/wagering/transactions/${refund.body.transactionId}`);
+      expect(view.body.gameId).toBe(game);
     } finally {
       await worker.close();
     }

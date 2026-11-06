@@ -155,7 +155,7 @@ export class ProcessWagerTransaction {
         money: { amount: cmd.amount.toString(), currency: cmd.currency },
         balance: { amount: outcome.balance.toString(), currency: wallet.currency },
         roundId: cmd.roundId,
-        gameId: cmd.gameId,
+        gameId: outcome.gameId,
         referenceExternalTransactionId: cmd.referenceExternalId,
         failureCode: outcome.failureCode,
         retryCount: outcome.retryCount,
