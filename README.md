@@ -130,6 +130,11 @@ concurrency 64): ~456 req/s, p50 128 ms, p95 274 ms, p99 425 ms, 0 % errors, 686
 0 diverging wallets. Load generator, both instances and the databases share the machine, so read it as relative, not as
 capacity.
 
+## License
+
+All rights reserved. The code is public so it can be read and evaluated; no permission to use, copy, modify or
+distribute it is granted. See [LICENSE](LICENSE).
+
 ## Authentication
 
 Not scored and not enabled by default. There is an explicit extension point (`Authenticator`, a global guard and a
