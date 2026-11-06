@@ -1,7 +1,8 @@
 import type { LoggerService, LogLevel } from '@nestjs/common';
 import { LogContext } from './log-context';
 
-const LEVEL_ORDER: Record<string, number> = { verbose: 0, debug: 1, log: 2, warn: 3, error: 4, fatal: 5 };
+/** `silent` drops everything (used by tests so expected error logs do not look like failures). */
+const LEVEL_ORDER: Record<string, number> = { verbose: 0, debug: 1, log: 2, warn: 3, error: 4, fatal: 5, silent: 99 };
 const LEVEL_NAME: Record<string, string> = {
   verbose: 'trace',
   debug: 'debug',

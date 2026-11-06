@@ -4,6 +4,7 @@ import { NestFactory } from '@nestjs/core';
 import type { INestApplication } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { AppModule } from '../../src/app.module';
+import { JsonLogger } from '../../src/infrastructure/observability/json-logger';
 import config from '../../src/infrastructure/persistence/mikro-orm.config';
 
 export interface TestApp {
@@ -21,7 +22,9 @@ export async function bootApp(env: Record<string, string> = {}): Promise<TestApp
   for (const [k, v] of Object.entries(env)) process.env[k] = v;
   const orm = await MikroORM.init(config);
   await orm.migrator.up(); // idempotent
-  const app = await NestFactory.create(AppModule, { logger: ['error'] });
+  // Expected error/warn logs (simulated crashes, deliberate corruption) must not look like failures in
+  // the test report. Tests that care assert on logs explicitly; set TEST_LOG_LEVEL=error to see them all.
+  const app = await NestFactory.create(AppModule, { logger: new JsonLogger(process.env.TEST_LOG_LEVEL ?? 'silent') });
   await app.listen(0);
   const url = await app.getUrl();
   return {

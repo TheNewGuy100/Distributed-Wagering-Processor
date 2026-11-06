@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { JsonLogger } from '../../src/infrastructure/observability/json-logger';
 import { MetricsService } from '../../src/infrastructure/observability/metrics.service';
 import { api, bootApp, createWallet, expectLedgerConsistent, uid, wager, type TestApp } from './helpers';
 
@@ -11,10 +12,23 @@ const fast = {
 };
 
 let t: TestApp; // API only (worker off): creates the situations
+const logLines: Record<string, unknown>[] = [];
+const originalWrite = JsonLogger.write;
 beforeAll(async () => {
+  JsonLogger.write = (line) => {
+    try {
+      logLines.push(JSON.parse(line));
+    } catch {
+      /* not a JSON log line */
+    }
+  };
   t = await bootApp();
+  t.app.useLogger(new JsonLogger('log')); // capture instead of printing; asserted below
 });
-afterAll(() => t.close());
+afterAll(async () => {
+  JsonLogger.write = originalWrite;
+  await t.close();
+});
 
 async function waitFor<T>(fn: () => Promise<T | false>, timeoutMs = 15000, label = 'condition'): Promise<T> {
   const start = Date.now();
@@ -136,6 +150,8 @@ describe('reconciliation', () => {
     await wager(t, w, { amount: '10.00' });
     const metrics = t.app.get(MetricsService);
     const before = metrics.get('wallet_reconciliation_divergences_total');
+    // Nest's logger is process-global: apps booted by earlier tests replaced it, so set it again here.
+    t.app.useLogger(new JsonLogger('log'));
 
     // Simulated corruption (the ledger itself is immutable; the balance column is not).
     await t.orm.em.fork().execute('update wallets set balance = balance + 7.00 where id = ?', [w.walletId]);
@@ -148,6 +164,12 @@ describe('reconciliation', () => {
     expect(r.body.differences.join(' ')).toContain('stored balance 97.00 != ledger-derived balance 90.00');
     expect(r.body.flaggedAt).not.toBeNull();
     expect(metrics.get('wallet_reconciliation_divergences_total')).toBe(before + 1);
+
+    // The divergence is logged at ERROR level with the wallet id and what disagrees (not printed: asserted here).
+    const logged = logLines.filter((l) => l.level === 'error' && String(l.msg).includes(w.walletId));
+    expect(logged).toHaveLength(1);
+    expect(String(logged[0]!.msg)).toContain('reconciliation_divergence');
+    expect(String(logged[0]!.msg)).toContain('stored balance 97.00 != ledger-derived balance 90.00');
 
     const wallet = await api(t, 'GET', `/wallets/${w.walletId}`);
     expect(wallet.body.balance).toBe('97.00'); // left exactly as found
