@@ -20,6 +20,24 @@ starts `app` only after it succeeded and both dependencies are healthy. The API 
 (`/health/ready` is the container healthcheck). `docker compose stop app` is a graceful shutdown (in-flight SQS
 messages and the outbox batch finish first; about 1 s). `docker compose down -v` removes everything.
 
+### Try it in the browser: the test console
+
+Open **http://localhost:3000** (it redirects to `/ui`). It is a small page served by the API itself, with no build step and
+no dependencies, to drive the flows by hand and watch what happens:
+
+* create a wallet, submit `BET` / `WIN` / `LOSS` / `REFUND` / `ROLLBACK`, **replay** the last request, or replay it with another
+  amount to see the idempotency conflict; the wallet balance and its **ledger** update after every call;
+* **six one-click scenarios**, each on its own wallet and verified against the ledger: ten identical bets at once (booked
+  once), twenty bets fighting for 10.00 (exactly ten accepted), a reversal arriving before its bet (parked, then applied by the
+  background worker), a second reversal refused, a spent win that cannot be rolled back, and the same id with another amount;
+* **live metrics** (processed, rejected, duplicates absorbed, lock conflicts, outbox lag) and a **request log** with the full
+  request and response of every call and its correlation id;
+* a field for a bearer token when authentication is on (kept in memory only).
+
+It is a development tool: `UI_ENABLED=false` turns it off (`/` and `/ui` then answer 404). It only makes same-origin requests,
+renders every API value as text (never as HTML) and is served with a strict content security policy (no inline script, no
+external origin); tests guard all three.
+
 ### Local development (Bun on the host, infra in containers)
 
 Requirements: [Bun](https://bun.sh) 1.4+, Docker (with Compose).
@@ -120,6 +138,7 @@ See [.env.example](.env.example) for the basics. Tuning knobs, all optional:
 | `PENDING_MAX_RETRIES` / `PENDING_BASE_DELAY_MS` / `PENDING_MAX_DELAY_MS` | `8` / `1000` / `300000` | Backoff before `REFERENCE_NOT_FOUND` |
 | `LOCK_CONFLICT_THRESHOLD_MS` | `25` | Wallet lock wait counted as a conflict |
 | `LOG_LEVEL` | `log` | `verbose`, `debug`, `log`, `warn`, `error` |
+| `UI_ENABLED` | `true` | Serve the browser test console at `/ui` (and redirect `/` to it) |
 
 ## Tests
 

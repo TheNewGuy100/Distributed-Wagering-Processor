@@ -21,6 +21,7 @@ import { ReconciliationService } from './application/wallet/reconciliation-servi
 import { MetricsBootstrap } from './infrastructure/observability/metrics-bootstrap';
 import { MetricsService } from './infrastructure/observability/metrics.service';
 import { MetricsController } from './interfaces/http/metrics.controller';
+import { UiController } from './interfaces/http/ui.controller';
 import { RequestContextMiddleware } from './interfaces/http/request-context.middleware';
 import { OUTBOX_CONFIG, loadOutboxConfig } from './infrastructure/outbox/outbox.config';
 import { OutboxHooks, OutboxPublisher } from './infrastructure/outbox/outbox-publisher.service';
@@ -34,7 +35,7 @@ import { SqsConsumer } from './interfaces/sqs/sqs-consumer.service';
 
 @Module({
   imports: [MikroOrmModule.forRootAsync({ useFactory: () => buildOrmConfig() })],
-  controllers: [HealthController, WalletsController, WageringController, MetricsController],
+  controllers: [HealthController, WalletsController, WageringController, MetricsController, UiController],
   providers: [
     { provide: SQS_CONFIG, useFactory: () => loadSqsConfig() },
     {

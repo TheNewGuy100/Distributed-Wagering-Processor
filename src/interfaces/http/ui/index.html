@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wagering Processor · test console</title>
+  <link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>Wagering Processor <span class="muted">test console</span></h1>
+      <p class="muted small">Drive the API from the browser and watch what it does. Everything here is a plain HTTP call to this same server.</p>
+    </div>
+    <div class="conn" aria-live="polite">
+      <span class="chip" id="chip-live" title="GET /health/live">live <b>…</b></span>
+      <span class="chip" id="chip-ready" title="GET /health/ready">ready <b>…</b></span>
+      <span class="chip" id="chip-pg" title="PostgreSQL">postgres <b>…</b></span>
+      <span class="chip" id="chip-sqs" title="SQS">sqs <b>…</b></span>
+    </div>
+  </header>
+
+  <div id="auth-banner" class="banner" hidden>
+    <b>Authentication is enabled.</b> Paste a bearer token below (see the README, "Try it with a real Keycloak").
+    Endpoints answer 403 when the token lacks the role they need.
+  </div>
+
+  <main class="grid">
+    <!-- ───────────── token ───────────── -->
+    <section class="card span2">
+      <h2>Bearer token <span class="muted small">(optional, kept in memory only, never stored)</span></h2>
+      <div class="row">
+        <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="eyJhbGciOi… (only needed when AUTH_MODE=jwt)">
+        <button id="token-clear" type="button" class="ghost">Clear</button>
+      </div>
+    </section>
+
+    <!-- ───────────── wallet ───────────── -->
+    <section class="card">
+      <h2>1 · Wallet</h2>
+      <form id="wallet-form" class="stack">
+        <label>Player id <input id="w-player" required maxlength="128"></label>
+        <div class="row">
+          <label>Currency <input id="w-currency" value="BRL" maxlength="3" size="4" required></label>
+          <label class="grow">Opening credit <input id="w-opening" value="100.00" inputmode="decimal" placeholder="100.00"></label>
+        </div>
+        <div class="row">
+          <button type="submit">Create wallet</button>
+          <button type="button" id="w-new-player" class="ghost">New player id</button>
+        </div>
+      </form>
+
+      <div id="wallet-view" class="walletview" hidden>
+        <div class="balance"><span class="muted small">balance</span> <strong id="wv-balance">–</strong> <span id="wv-currency" class="muted"></span></div>
+        <dl class="kv">
+          <dt>wallet</dt><dd><code id="wv-id"></code></dd>
+          <dt>player</dt><dd id="wv-player"></dd>
+          <dt>version</dt><dd id="wv-version"></dd>
+          <dt>flagged</dt><dd id="wv-flag"></dd>
+        </dl>
+        <div class="row">
+          <button type="button" id="wv-refresh" class="ghost">Refresh</button>
+          <button type="button" id="wv-reconcile" class="ghost">Reconcile</button>
+        </div>
+        <div id="wv-recon" class="result small" hidden></div>
+      </div>
+    </section>
+
+    <!-- ───────────── transaction ───────────── -->
+    <section class="card">
+      <h2>2 · Submit a transaction</h2>
+      <form id="tx-form" class="stack">
+        <div class="row">
+          <label>Kind
+            <select id="t-kind">
+              <option>BET</option><option>WIN</option><option>LOSS</option><option>REFUND</option><option>ROLLBACK</option>
+            </select>
+          </label>
+          <label class="grow">Provider <input id="t-provider" value="acme" required maxlength="128"></label>
+          <label>Amount <input id="t-amount" value="10.00" inputmode="decimal" size="8" required></label>
+        </div>
+        <label>External transaction id
+          <span class="row"><input id="t-ext" class="grow" required maxlength="255"><button type="button" id="t-ext-new" class="ghost" title="new id">new</button></span>
+        </label>
+        <div class="row">
+          <label class="grow">Round id <input id="t-round" value="round-1" maxlength="128"></label>
+          <label class="grow" id="t-ref-wrap" hidden>References (external id) <input id="t-ref" maxlength="255" placeholder="the BET/WIN being reversed"></label>
+        </div>
+        <label>Idempotency-Key <span class="muted small">(optional; default provider:external id)</span> <input id="t-idem" maxlength="255"></label>
+        <div class="row wrap">
+          <button type="submit">Submit</button>
+          <button type="button" id="t-replay" class="ghost" disabled>Replay last (same payload)</button>
+          <button type="button" id="t-conflict" class="ghost" disabled>Replay with another amount</button>
+        </div>
+      </form>
+      <div id="tx-result" class="result" aria-live="polite" hidden></div>
+    </section>
+
+    <!-- ───────────── ledger ───────────── -->
+    <section class="card span2">
+      <h2>3 · Ledger <span class="muted small">(append-only: every balance change, in order)</span></h2>
+      <div class="tablewrap">
+        <table id="ledger">
+          <thead><tr><th>#</th><th>direction</th><th class="num">amount</th><th class="num">balance after</th><th>transaction</th><th>time</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="row"><button type="button" id="ledger-more" class="ghost" hidden>Load more</button><span id="ledger-empty" class="muted small">Create a wallet to see its ledger.</span></div>
+    </section>
+
+    <!-- ───────────── scenarios ───────────── -->
+    <section class="card span2">
+      <h2>4 · Scenarios <span class="muted small">each one creates its own wallet and checks the result against the ledger</span></h2>
+      <div class="scenarios" id="scenarios"></div>
+    </section>
+
+    <!-- ───────────── metrics ───────────── -->
+    <section class="card span2">
+      <h2>5 · Live metrics <span class="muted small">(from <code>/metrics</code>, change since this page was opened)</span>
+        <label class="inline small"><input type="checkbox" id="m-live" checked> refresh every 2 s</label></h2>
+      <div class="tiles" id="tiles"></div>
+    </section>
+
+    <!-- ───────────── log ───────────── -->
+    <section class="card span2">
+      <h2>6 · Request log <button type="button" id="log-clear" class="ghost small">Clear</button></h2>
+      <p class="muted small">Every call this page makes. Click a row for the request and the response.</p>
+      <div id="log" class="log"></div>
+    </section>
+  </main>
+
+  <footer class="muted small">Development tool. Disable it with <code>UI_ENABLED=false</code>. It makes only same-origin requests and renders all API data as text.</footer>
+  <script src="/ui/app.js" defer></script>
+</body>
+</html>

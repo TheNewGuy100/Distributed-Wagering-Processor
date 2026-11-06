@@ -48,6 +48,24 @@ reconciliation, `/metrics`, and a prompt graceful stop). The integration tests d
 `app` container: they boot their own instances, and a second consumer or outbox publisher on the same database would race
 them, so the test helpers refuse to run when something answers on port 3000.
 
+### The browser test console (`/ui`)
+
+A small static page (HTML, CSS and one script, no framework, no build) served by the API to exercise the flows by hand:
+wallet, transactions with replay and conflict, ledger, six verified scenarios (concurrent idempotency, contention, a
+reversal arriving before its reference, a second reversal, an overdrawing rollback, an id reused with another payload),
+live metrics and a request log. It is a client like any other: it calls the public endpoints, so it needs no special access
+and every call goes through the normal authentication (a token field is provided).
+
+Because it renders strings chosen by API callers, it is built so those cannot become markup or code: every value is inserted
+with `textContent` (a tiny `h()` element builder, never `innerHTML`); the page is served with a strict
+`Content-Security-Policy` (`default-src 'none'`, `script-src 'self'`, same-origin `connect-src`, no inline script or style, no
+framing), `nosniff`, `no-referrer` and `no-store`. Tests assert the policy, that the source contains no HTML-parsing API (the
+check ignores comments and was verified to catch a real `innerHTML`), that `index.html` has no inline script, handler or style,
+and that the page stays reachable but its API calls stay protected when `AUTH_MODE=jwt`. A hostile payload
+(`<img onerror>`, `<script>`, `<svg onload>` as player, provider and round ids) was also run through a real browser: it is
+displayed as text and never executes. The page is public (it holds no data) and is switched off with `UI_ENABLED=false`;
+outside production the server rereads its files per request so edits show up on reload.
+
 ### Persistence: MikroORM end to end
 
 MikroORM owns the whole data path: the connection pool, transactions (`em.transactional`), the **entities**

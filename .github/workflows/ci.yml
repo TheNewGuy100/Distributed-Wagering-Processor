@@ -77,6 +77,10 @@ jobs:
           curl -fsS $api/wallets/$id | grep -q '"balance":"90.00"'
           curl -fsS -X POST $api/wallets/$id/reconciliation | grep -q '"divergent":false'
           curl -fsS $api/metrics | grep -q '^wager_transactions_total'
+          # the browser test console ships in the image, with its strict content security policy
+          curl -fsS -o /dev/null $api/ui
+          curl -fsS -o /dev/null $api/ui/app.js
+          curl -fsSI $api/ui | grep -qi "^content-security-policy: default-src 'none'"
       - name: Stop is graceful and prompt (SIGTERM as PID 1; a leaked shutdown timer once made this take 20 s)
         run: |
           start=$(date +%s)
