@@ -4,3 +4,4 @@ dist
 *.log
 coverage
 load-test-report.json
+.snapshot-*.json
