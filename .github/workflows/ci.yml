@@ -70,15 +70,17 @@ jobs:
           set -euo pipefail
           api=http://localhost:3000
           json='content-type: application/json'
-          wallet=$(curl -fsS -X POST $api/wallets -H "$json" -d '{"playerId":"ci-smoke","currency":"BRL","openingCredit":"100.00"}')
-          id=$(echo "$wallet" | grep -o '"walletId":"[^"]*"' | cut -d'"' -f4)
-          bet='{"providerId":"acme","externalTransactionId":"ci-bet-1","kind":"BET","playerId":"ci-smoke","currency":"BRL","amount":"10.00","roundId":"r1"}'
-          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST $api/wagering/transactions -H "$json" -d "$bet")" = 201
-          replay=$(curl -s -w ' %{http_code}' -X POST $api/wagering/transactions -H "$json" -d "$bet")
+          wallet=$(curl -fsS -X POST $api/wallets -H "$json" -d '{"playerId":"ci-smoke","initialBalance":{"amount":"100.00","currency":"BRL"}}')
+          id=$(echo "$wallet" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+          bet='{"providerId":"acme","externalTransactionId":"ci-bet-1","kind":"BET","playerId":"ci-smoke","walletId":"'$id'","money":{"amount":"10.00","currency":"BRL"},"roundId":"r1","gameId":"fortune-chimp"}'
+          idem='idempotency-key: acme:ci-bet-1'
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST $api/wagering/transactions -H "$json" -H "$idem" -d "$bet")" = 201
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST $api/wagering/transactions -H "$json" -d "$bet")" = 400
+          replay=$(curl -s -w ' %{http_code}' -X POST $api/wagering/transactions -H "$json" -H "$idem" -d "$bet")
           echo "$replay" | grep -q '"idempotentReplay":true'
           echo "$replay" | grep -q ' 200$'
-          curl -fsS $api/wallets/$id | grep -q '"balance":"90.00"'
-          curl -fsS -X POST $api/wallets/$id/reconciliation | grep -q '"divergent":false'
+          curl -fsS $api/wallets/$id | grep -q '"balance":{"amount":"90.00","currency":"BRL"}'
+          curl -fsS -X POST $api/wallets/$id/reconciliation | grep -q '"consistent":true'
           curl -fsS $api/metrics | grep -q '^wager_transactions_total'
           # the browser test console ships in the image, with its strict content security policy
           curl -fsS -o /dev/null $api/ui

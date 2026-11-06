@@ -43,12 +43,12 @@ async function captureSql(orm: { config: { getLogger(): unknown } }, fn: () => P
 const indexOfStmt = (stmts: string[], re: RegExp) => stmts.findIndex((s) => re.test(s));
 
 describe('wallet lock ordering (as sent to PostgreSQL)', () => {
-  const scenarios: [string, (w: { playerId: string; currency: string }) => Promise<unknown>][] = [
+  const scenarios: [string, (w: { playerId: string; walletId: string; currency: string }) => Promise<unknown>][] = [
     ['a BET', (w) => wager(t, w, { amount: '1.00' })],
     ['a WIN', (w) => wager(t, w, { kind: 'WIN', amount: '1.00' })],
     ['a LOSS (no balance change)', (w) => wager(t, w, { kind: 'LOSS', amount: '1.00' })],
     ['a rejected BET', (w) => wager(t, w, { amount: '9999.00' })],
-    ['a reversal waiting for its reference', (w) => wager(t, w, { kind: 'REFUND', amount: '1.00', referenceExternalId: uid('later') })],
+    ['a reversal waiting for its reference', (w) => wager(t, w, { kind: 'REFUND', amount: '1.00', referenceExternalTransactionId: uid('later') })],
   ];
 
   for (const [name, run] of scenarios) {

@@ -91,9 +91,10 @@
         </label>
         <div class="row">
           <label class="grow">Round id <input id="t-round" value="round-1" maxlength="128"></label>
+          <label class="grow">Game id <input id="t-game" value="fortune-chimp" maxlength="128"></label>
           <label class="grow" id="t-ref-wrap" hidden>References (external id) <input id="t-ref" maxlength="255" placeholder="the BET/WIN being reversed"></label>
         </div>
-        <label>Idempotency-Key <span class="muted small">(optional; default provider:external id)</span> <input id="t-idem" maxlength="255"></label>
+        <label>Idempotency-Key <span class="muted small">(required; defaults to provider:external id)</span> <input id="t-idem" maxlength="255"></label>
         <div class="row wrap">
           <button type="submit">Submit</button>
           <button type="button" id="t-replay" class="ghost" disabled>Replay last (same payload)</button>

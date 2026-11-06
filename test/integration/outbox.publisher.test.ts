@@ -27,8 +27,10 @@ interface Envelope {
   eventType: string;
   version: number;
   aggregateId: string;
+  correlationId: string;
+  causationId?: string;
   occurredAt: string;
-  data: Record<string, unknown>;
+  data: Record<string, any>;
 }
 
 beforeAll(async () => {
@@ -96,7 +98,7 @@ describe('event content', () => {
     const bet = await wager(t, w, { amount: '10.00' });
     const loss = await wager(t, w, { kind: 'LOSS', amount: '10.00' }); // no balance change
     const rejected = await wager(t, w, { amount: '999.00' });
-    const pending = await wager(t, w, { kind: 'REFUND', amount: '5.00', referenceExternalId: uid('nope') });
+    const pending = await wager(t, w, { kind: 'REFUND', amount: '5.00', referenceExternalTransactionId: uid('nope') });
     const mine = new Set([
       ...(await walletAggregates(w.walletId)),
       bet.body.transactionId,
@@ -122,11 +124,22 @@ describe('event content', () => {
         expect(new Date(e.occurredAt).toISOString()).toBe(e.occurredAt);
       }
       const changed = byType('WalletBalanceChanged').map((e) => e.data);
-      expect(changed.map((d) => [d.direction, d.amount, d.balanceAfter, d.walletVersion])).toEqual([
-        ['CREDIT', '100.00', '100.00', 1],
-        ['DEBIT', '10.00', '90.00', 2],
+      expect(
+        changed.map((d) => [d.direction, d.money.amount, d.balanceBefore.amount, d.balanceAfter.amount, d.walletVersion]),
+      ).toEqual([
+        ['CREDIT', '100.00', '0.00', '100.00', 1],
+        ['DEBIT', '10.00', '100.00', '90.00', 2],
       ]);
-      expect(typeof changed[0]!.amount).toBe('string'); // money is never a JSON number
+      expect(typeof changed[0]!.money.amount).toBe('string'); // money is never a JSON number
+      expect(changed[0]!.money.currency).toBe('BRL');
+      // The envelope ties events together: one correlationId per request, causationId points at what caused it.
+      for (const e of events) {
+        expect(typeof e.correlationId).toBe('string');
+        expect(e.correlationId.length).toBeGreaterThan(0);
+      }
+      const bet = byType('WagerTransactionProcessed').find((e) => e.data.kind === 'BET')!;
+      expect(bet.data.gameId).toBe('fortune-chimp');
+      expect(bet.data.money).toEqual({ amount: '10.00', currency: 'BRL' });
     } finally {
       await pub.close();
     }
@@ -235,6 +248,6 @@ describe('delivery guarantees', () => {
       await pub.close();
     }
     expect(await pendingFor([...mine])).toBe(0);
-    expect((await api(t, 'GET', `/wallets/${w.walletId}`)).body.balance).toBe('15.00');
+    expect((await api(t, 'GET', `/wallets/${w.walletId}`)).body.balance.amount).toBe('15.00');
   }, 60000);
 });

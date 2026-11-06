@@ -20,9 +20,11 @@ describe('Wallet', () => {
     w.debit('t2', brl('30.50'));
     expect(w.balance.toString()).toBe('69.50');
     expect(w.version).toBe(2);
-    expect(w.pendingEntries.map((e) => [e.direction, e.amount.toString(), e.balanceAfter.toString()])).toEqual([
-      ['CREDIT', '100.00', '100.00'],
-      ['DEBIT', '30.50', '69.50'],
+    expect(
+      w.pendingEntries.map((e) => [e.direction, e.amount.toString(), e.balanceBefore.toString(), e.balanceAfter.toString()]),
+    ).toEqual([
+      ['CREDIT', '100.00', '0.00', '100.00'],
+      ['DEBIT', '30.50', '100.00', '69.50'],
     ]);
   });
 

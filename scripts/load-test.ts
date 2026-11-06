@@ -80,9 +80,9 @@ console.log(`Setting up ${WALLETS} wallets...`);
 const wallets: { playerId: string; walletId: string }[] = [];
 for (let i = 0; i < WALLETS; i++) {
   const playerId = `load-${suffix}-${i}`;
-  const r = await post('/wallets', { playerId, currency: 'BRL', openingCredit: '1000000.00' });
+  const r = await post('/wallets', { playerId, initialBalance: { amount: '1000000.00', currency: 'BRL' } });
   if (r.status !== 201) throw new Error(`wallet setup failed: ${r.status}`);
-  wallets.push({ playerId, walletId: r.json!.walletId as string });
+  wallets.push({ playerId, walletId: r.json!.id as string });
 }
 const before = await scrape();
 
@@ -113,16 +113,19 @@ async function oneRequest(): Promise<void> {
       externalTransactionId: randomUUID(),
       kind,
       playerId: w.playerId,
-      currency: 'BRL',
-      amount: cents(),
+      walletId: w.walletId,
+      money: { amount: cents(), currency: 'BRL' },
       roundId: `round-${Math.floor(Math.random() * 1000)}`,
+      gameId: `game-${Math.floor(Math.random() * 5)}`,
     };
     recent.push({ body });
     if (recent.length > 500) recent.shift();
   }
   const t0 = performance.now();
   try {
-    const r = await post('/wagering/transactions', body);
+    const r = await post('/wagering/transactions', body, {
+      'idempotency-key': `${body.providerId}:${body.externalTransactionId}`,
+    });
     latencies.push(performance.now() - t0);
     statusCounts.set(String(r.status), (statusCounts.get(String(r.status)) ?? 0) + 1);
     if (r.status >= 500 || ![200, 201, 202, 422].includes(r.status)) errors++;
@@ -167,7 +170,7 @@ const after = await scrape();
 let divergent = 0;
 for (const w of wallets) {
   const r = await post(`/wallets/${w.walletId}/reconciliation`, {});
-  if (r.json?.divergent !== false) divergent++;
+  if (r.json?.consistent !== true) divergent++;
 }
 
 // ---- report -----------------------------------------------------------------------------------

@@ -93,33 +93,50 @@ export async function api(t: TestApp, method: string, path: string, body?: unkno
 
 export async function createWallet(t: TestApp, opening?: string, currency = 'BRL') {
   const playerId = uid('player');
-  const r = await api(t, 'POST', '/wallets', { playerId, currency, ...(opening ? { openingCredit: opening } : {}) });
+  const r = await api(t, 'POST', '/wallets', {
+    playerId,
+    initialBalance: { amount: opening ?? '0.00', currency },
+  });
   if (r.status !== 201) throw new Error(`wallet creation failed: ${r.status} ${JSON.stringify(r.body)}`);
-  return { playerId, walletId: r.body.walletId as string, currency };
+  return { playerId, walletId: r.body.id as string, currency };
+}
+
+/**
+ * Builds a wager payload in the wire format of the challenge. `over` may set the flat shortcuts `amount` and
+ * `currency` (turned into `money`) next to any other field; `Idempotency-Key` defaults to provider:externalId.
+ */
+export function wagerBody(
+  w: { playerId: string; walletId: string; currency: string },
+  over: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const { amount, currency, ...rest } = over as { amount?: string; currency?: string };
+  const body: Record<string, unknown> = {
+    providerId: 'prov-a',
+    externalTransactionId: uid('ext'),
+    kind: 'BET',
+    playerId: w.playerId,
+    walletId: w.walletId,
+    money: { amount: amount ?? '10.00', currency: currency ?? w.currency },
+    roundId: 'round-1',
+    gameId: 'fortune-chimp',
+    ...rest,
+  };
+  if (body.kind === 'REFUND' || body.kind === 'ROLLBACK') delete body.gameId;
+  return body;
 }
 
 export const wager = (
   t: TestApp,
-  w: { playerId: string; currency: string },
+  w: { playerId: string; walletId: string; currency: string },
   over: Record<string, unknown> = {},
   headers: Record<string, string> = {},
-) =>
-  api(
-    t,
-    'POST',
-    '/wagering/transactions',
-    {
-      providerId: 'prov-a',
-      externalTransactionId: uid('ext'),
-      kind: 'BET',
-      playerId: w.playerId,
-      currency: w.currency,
-      amount: '10.00',
-      roundId: 'round-1',
-      ...over,
-    },
-    headers,
-  );
+) => {
+  const body = wagerBody(w, over);
+  return api(t, 'POST', '/wagering/transactions', body, {
+    'idempotency-key': `${body.providerId}:${body.externalTransactionId}`,
+    ...headers,
+  });
+};
 
 /** Final invariant used by every test: stored balance == balance rebuilt from the ledger. */
 export async function expectLedgerConsistent(t: TestApp, walletId: string) {

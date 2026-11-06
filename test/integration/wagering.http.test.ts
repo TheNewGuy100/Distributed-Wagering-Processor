@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { api, bootApp, createWallet, expectLedgerConsistent, uid, wager, type TestApp } from './helpers';
+import { api, bootApp, createWallet, expectLedgerConsistent, uid, wager, wagerBody, type TestApp } from './helpers';
 
 let t: TestApp;
 beforeAll(async () => {
@@ -12,25 +12,25 @@ describe('wallets', () => {
     const w = await createWallet(t, '100.00');
     const got = await api(t, 'GET', `/wallets/${w.walletId}`);
     expect(got.status).toBe(200);
-    expect(got.body).toMatchObject({ balance: '100.00', version: 1, currency: 'BRL' });
+    expect(got.body).toMatchObject({ id: w.walletId, balance: { amount: '100.00', currency: 'BRL' }, version: 1 });
     expect(await expectLedgerConsistent(t, w.walletId)).toEqual({ balance: '100.00', entries: 1 });
 
-    const dup = await api(t, 'POST', '/wallets', { playerId: w.playerId, currency: 'BRL' });
+    const dup = await api(t, 'POST', '/wallets', { playerId: w.playerId, initialBalance: { amount: '1.00', currency: 'BRL' } });
     expect(dup.status).toBe(409);
     expect(dup.body.error.code).toBe('WALLET_ALREADY_EXISTS');
   });
 
   test('same player may hold one wallet per currency; no opening credit means no ledger entry', async () => {
     const playerId = uid('multi');
-    expect((await api(t, 'POST', '/wallets', { playerId, currency: 'BRL' })).status).toBe(201);
-    const usd = await api(t, 'POST', '/wallets', { playerId, currency: 'USD' });
+    expect((await api(t, 'POST', '/wallets', { playerId, initialBalance: { amount: '0.00', currency: 'BRL' } })).status).toBe(201);
+    const usd = await api(t, 'POST', '/wallets', { playerId, initialBalance: { amount: '0.00', currency: 'USD' } });
     expect(usd.status).toBe(201);
-    expect(await expectLedgerConsistent(t, usd.body.walletId)).toEqual({ balance: '0.00', entries: 0 });
+    expect(await expectLedgerConsistent(t, usd.body.id)).toEqual({ balance: '0.00', entries: 0 });
   });
 
   test('validates input and unknown ids', async () => {
-    expect((await api(t, 'POST', '/wallets', { playerId: 'p', currency: 'brl' })).status).toBe(400);
-    expect((await api(t, 'POST', '/wallets', { playerId: 'p', currency: 'BRL', openingCredit: 10.5 })).status).toBe(400);
+    expect((await api(t, 'POST', '/wallets', { playerId: 'p', initialBalance: { amount: '0.00', currency: 'brl' } })).status).toBe(400);
+    expect((await api(t, 'POST', '/wallets', { playerId: 'p', initialBalance: { amount: 10.5, currency: 'BRL' } })).status).toBe(400);
     expect((await api(t, 'GET', '/wallets/not-a-uuid')).status).toBe(400);
     expect((await api(t, 'GET', `/wallets/${crypto.randomUUID()}`)).status).toBe(404);
   });
@@ -75,14 +75,14 @@ describe('transactions', () => {
 
   test('invalid payloads return 400', async () => {
     const w = await createWallet(t, '5.00');
-    for (const over of [{ amount: 10 }, { amount: '10.5' }, { kind: 'OPENING' }, { kind: 'REFUND' }, { currency: 'xx' }]) {
+    for (const over of [{ money: { amount: 10, currency: 'BRL' } }, { amount: '10.5' }, { kind: 'OPENING' }, { kind: 'REFUND' }, { currency: 'xx' }, { gameId: undefined }]) {
       expect((await wager(t, w, over)).status).toBe(400);
     }
     expect((await api(t, 'POST', '/wagering/transactions', 'nope')).status).toBe(400);
   });
 
   test('unknown wallet returns 404 and persists nothing', async () => {
-    const r = await wager(t, { playerId: uid('ghost'), currency: 'BRL' });
+    const r = await wager(t, { playerId: uid('ghost'), walletId: crypto.randomUUID(), currency: 'BRL' });
     expect(r.status).toBe(404);
   });
 
@@ -103,6 +103,60 @@ describe('transactions', () => {
     expect(keyReuse.status).toBe(409);
 
     expect(await expectLedgerConsistent(t, w.walletId)).toEqual({ balance: '90.00', entries: 2 });
+  });
+
+  test('the Idempotency-Key header is mandatory, and the response carries the balance in the challenge format', async () => {
+    const w = await createWallet(t, '100.00');
+    const body = wagerBody(w, { amount: '25.00' });
+    const without = await api(t, 'POST', '/wagering/transactions', body); // no header
+    expect(without.status).toBe(400);
+    expect(without.body.error.message).toContain('Idempotency-Key');
+    const ok = await wager(t, w, { amount: '25.00' });
+    expect(ok.status).toBe(201);
+    expect(ok.body).toMatchObject({ status: 'PROCESSED', balance: { amount: '75.00', currency: 'BRL' }, idempotentReplay: false });
+    expect(await expectLedgerConsistent(t, w.walletId)).toEqual({ balance: '75.00', entries: 2 });
+  });
+
+  test('a replay returns the balance observed back then, not the current one', async () => {
+    const w = await createWallet(t, '100.00');
+    const ext = uid('ext');
+    const first = await wager(t, w, { externalTransactionId: ext, amount: '10.00' });
+    expect(first.body.balance.amount).toBe('90.00');
+    await wager(t, w, { amount: '30.00' }); // the balance moves on
+    const replay = await wager(t, w, { externalTransactionId: ext, amount: '10.00' });
+    expect(replay.status).toBe(200);
+    expect(replay.body).toMatchObject({ idempotentReplay: true, balance: { amount: '90.00', currency: 'BRL' } });
+    // a rejection also remembers the balance it saw
+    const rejected = await wager(t, w, { amount: '999.00' });
+    expect(rejected.status).toBe(422);
+    expect(rejected.body.balance.amount).toBe('60.00');
+    const again = await api(t, 'GET', `/wagering/transactions/${rejected.body.transactionId}`);
+    expect(again.body.balance.amount).toBe('60.00');
+  });
+
+  test('walletId must belong to playerId; a bet needs a gameId, which is stored for reports', async () => {
+    const a = await createWallet(t, '100.00');
+    const b = await createWallet(t, '100.00');
+    const crossed = await wager(t, { playerId: a.playerId, walletId: b.walletId, currency: 'BRL' });
+    expect(crossed.status).toBe(400);
+    expect(await expectLedgerConsistent(t, b.walletId)).toEqual({ balance: '100.00', entries: 1 });
+
+    expect((await wager(t, a, { gameId: undefined })).status).toBe(400);
+    const game = uid('book-of-dead'); // the database is shared between runs
+    const ok = await wager(t, a, { gameId: game });
+    expect(ok.status).toBe(201);
+    const view = await api(t, 'GET', `/wagering/transactions/${ok.body.transactionId}`);
+    expect(view.body).toMatchObject({ gameId: game, roundId: 'round-1', money: { amount: '10.00', currency: 'BRL' } });
+    const rows = await t.orm.em.fork().execute<{ n: number }[]>('select count(*)::int n from wager_transactions where game_id = ?', [game]);
+    expect(rows[0]!.n).toBe(1);
+  });
+
+  test('a currency different from the wallet is a business rejection, not a server error', async () => {
+    const w = await createWallet(t, '100.00');
+    const r = await wager(t, w, { currency: 'USD' });
+    expect(r.status).toBe(422);
+    expect(r.body.failureCode).toBe('CURRENCY_MISMATCH');
+    expect(await expectLedgerConsistent(t, w.walletId)).toEqual({ balance: '100.00', entries: 1 });
   });
 
   test('replay of a rejection keeps returning the rejection', async () => {
@@ -132,10 +186,10 @@ describe('reversals', () => {
     const w = await createWallet(t, '20.00');
     const betExt = uid('bet');
     await wager(t, w, { externalTransactionId: betExt, amount: '8.00' });
-    const refund = await wager(t, w, { kind: 'REFUND', amount: '8.00', referenceExternalId: betExt });
+    const refund = await wager(t, w, { kind: 'REFUND', amount: '8.00', referenceExternalTransactionId: betExt });
     expect(refund.status).toBe(201);
-    const again = await wager(t, w, { kind: 'REFUND', amount: '8.00', referenceExternalId: betExt });
-    const rollback = await wager(t, w, { kind: 'ROLLBACK', amount: '8.00', referenceExternalId: betExt });
+    const again = await wager(t, w, { kind: 'REFUND', amount: '8.00', referenceExternalTransactionId: betExt });
+    const rollback = await wager(t, w, { kind: 'ROLLBACK', amount: '8.00', referenceExternalTransactionId: betExt });
     expect(again.body.failureCode).toBe('ALREADY_REVERSED');
     expect(rollback.body.failureCode).toBe('ALREADY_REVERSED');
     expect(await expectLedgerConsistent(t, w.walletId)).toEqual({ balance: '20.00', entries: 3 });
@@ -143,7 +197,7 @@ describe('reversals', () => {
 
   test('reversal arriving before its reference waits in PENDING_REFERENCE with a retry schedule', async () => {
     const w = await createWallet(t, '20.00');
-    const r = await wager(t, w, { kind: 'ROLLBACK', amount: '8.00', referenceExternalId: uid('missing') });
+    const r = await wager(t, w, { kind: 'ROLLBACK', amount: '8.00', referenceExternalTransactionId: uid('missing') });
     expect(r.status).toBe(202);
     expect(r.body.status).toBe('PENDING_REFERENCE');
     expect(r.body.nextRetryAt).not.toBeNull();
@@ -155,9 +209,9 @@ describe('reversals', () => {
     const winExt = uid('win');
     await wager(t, w, { kind: 'WIN', externalTransactionId: winExt, amount: '5.00' });
     await wager(t, w, { amount: '15.00' }); // spend everything
-    const mismatch = await wager(t, w, { kind: 'ROLLBACK', amount: '4.00', referenceExternalId: winExt });
+    const mismatch = await wager(t, w, { kind: 'ROLLBACK', amount: '4.00', referenceExternalTransactionId: winExt });
     expect(mismatch.body).toMatchObject({ failureCode: 'REFERENCE_MISMATCH' });
-    const overdraw = await wager(t, w, { kind: 'ROLLBACK', amount: '5.00', referenceExternalId: winExt });
+    const overdraw = await wager(t, w, { kind: 'ROLLBACK', amount: '5.00', referenceExternalTransactionId: winExt });
     expect(overdraw.body.failureCode).toBe('REVERSAL_WOULD_OVERDRAW');
     expect(await expectLedgerConsistent(t, w.walletId)).toEqual({ balance: '0.00', entries: 3 });
   });
@@ -201,8 +255,8 @@ describe('concurrency (real parallelism against PostgreSQL)', () => {
     const betExt = uid('bet');
     await wager(t, w, { externalTransactionId: betExt, amount: '20.00' });
     const results = await Promise.all([
-      ...Array.from({ length: 5 }, () => wager(t, w, { kind: 'REFUND', amount: '20.00', referenceExternalId: betExt })),
-      ...Array.from({ length: 5 }, () => wager(t, w, { kind: 'ROLLBACK', amount: '20.00', referenceExternalId: betExt })),
+      ...Array.from({ length: 5 }, () => wager(t, w, { kind: 'REFUND', amount: '20.00', referenceExternalTransactionId: betExt })),
+      ...Array.from({ length: 5 }, () => wager(t, w, { kind: 'ROLLBACK', amount: '20.00', referenceExternalTransactionId: betExt })),
     ]);
     expect(results.filter((r) => r.status === 201)).toHaveLength(1);
     expect(await expectLedgerConsistent(t, w.walletId)).toEqual({ balance: '50.00', entries: 3 });

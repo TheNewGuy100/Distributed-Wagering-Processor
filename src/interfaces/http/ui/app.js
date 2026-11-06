@@ -177,9 +177,9 @@ const newPlayerId = () => `player-${uid(6)}`;
 
 function showWallet(w) {
   $('#wallet-view').hidden = false;
-  $('#wv-balance').textContent = w.balance;
-  $('#wv-currency').textContent = w.currency;
-  $('#wv-id').textContent = w.walletId;
+  $('#wv-balance').textContent = w.balance.amount;
+  $('#wv-currency').textContent = w.balance.currency;
+  $('#wv-id').textContent = w.id;
   $('#wv-player').textContent = w.playerId;
   $('#wv-version').textContent = String(w.version);
   $('#wv-flag').textContent = w.flaggedAt ? `FLAGGED at ${w.flaggedAt}` : 'no';
@@ -216,8 +216,8 @@ async function loadLedger(reset) {
         {},
         h('td', { text: n }),
         h('td', { class: e.direction === 'CREDIT' ? 'credit' : 'debit', text: e.direction }),
-        h('td', { class: 'num', text: e.amount }),
-        h('td', { class: 'num', text: e.balanceAfter }),
+        h('td', { class: 'num', text: e.money.amount }),
+        h('td', { class: 'num', text: e.balanceAfter.amount }),
         h('td', { class: 'mono', text: e.transactionId.slice(0, 8) }),
         h('td', { class: 'muted', text: new Date(e.createdAt).toLocaleTimeString() }),
       ),
@@ -235,12 +235,13 @@ async function refreshAll() {
 
 $('#wallet-form').addEventListener('submit', async (ev) => {
   ev.preventDefault();
-  const body = { playerId: $('#w-player').value.trim(), currency: $('#w-currency').value.trim().toUpperCase() };
-  const opening = $('#w-opening').value.trim();
-  if (opening) body.openingCredit = opening;
+  const body = {
+    playerId: $('#w-player').value.trim(),
+    initialBalance: { amount: $('#w-opening').value.trim() || '0.00', currency: $('#w-currency').value.trim().toUpperCase() },
+  };
   const r = await api('POST', '/wallets', { body });
   if (r.status === 201) {
-    state.wallet = { walletId: r.data.walletId, playerId: r.data.playerId, currency: r.data.currency };
+    state.wallet = { walletId: r.data.id, playerId: r.data.playerId, currency: r.data.balance.currency };
     showWallet(r.data);
     $('#wv-recon').hidden = true;
     await loadLedger(true);
@@ -265,8 +266,8 @@ $('#wv-reconcile').addEventListener('click', async () => {
   if (r.status !== 200) return showResult(box, r);
   const d = r.data;
   box.append(
-    h('div', { class: 'head' }, h('span', { class: 'badge ' + (d.divergent ? 's4' : 's2'), text: d.divergent ? 'DIVERGENT' : 'consistent' })),
-    h('p', { text: `stored balance ${d.storedBalance} · ledger-derived ${d.calculatedBalance} · version ${d.storedVersion} · ${d.ledgerEntries} ledger entries` }),
+    h('div', { class: 'head' }, h('span', { class: 'badge ' + (d.consistent ? 's2' : 's4'), text: d.consistent ? 'consistent' : 'DIVERGENT' })),
+    h('p', { text: `stored balance ${d.storedBalance.amount} · ledger-derived ${d.calculatedBalance.amount} · difference ${d.difference.amount} · version ${d.storedVersion} · ${d.checkedEntries} ledger entries` }),
     ...d.differences.map((x) => h('p', { class: 'muted', text: x })),
   );
 });
@@ -288,15 +289,18 @@ function buildTx() {
     externalTransactionId: $('#t-ext').value.trim(),
     kind: $('#t-kind').value,
     playerId: state.wallet.playerId,
-    currency: state.wallet.currency,
-    amount: $('#t-amount').value.trim(),
+    walletId: state.wallet.walletId,
+    money: { amount: $('#t-amount').value.trim(), currency: state.wallet.currency },
   };
+  const game = $('#t-game').value.trim();
+  if (game) body.gameId = game;
   const round = $('#t-round').value.trim();
   if (round) body.roundId = round;
-  if (isReversal()) body.referenceExternalId = $('#t-ref').value.trim();
+  if (isReversal()) body.referenceExternalTransactionId = $('#t-ref').value.trim();
   const headers = {};
   const idem = $('#t-idem').value.trim();
-  if (idem) headers['idempotency-key'] = idem;
+  // The header is mandatory; left empty it defaults to provider:external id (the recommended form).
+  headers['idempotency-key'] = idem || `${body.providerId}:${body.externalTransactionId}`;
   return { body, headers };
 }
 
@@ -327,7 +331,7 @@ $('#tx-form').addEventListener('submit', async (ev) => {
 $('#t-replay').addEventListener('click', () => state.lastTx && submitTx(state.lastTx));
 $('#t-conflict').addEventListener('click', () => {
   if (!state.lastTx) return;
-  const changed = { ...state.lastTx, body: { ...state.lastTx.body, amount: addMoney(state.lastTx.body.amount, 100) } };
+  const changed = { ...state.lastTx, body: { ...state.lastTx.body, money: { ...state.lastTx.body.money, amount: addMoney(state.lastTx.body.money.amount, 100) } } };
   return submitTx(changed);
 });
 
@@ -336,15 +340,18 @@ const PROVIDER = 'acme';
 
 async function scenarioWallet(opening) {
   const playerId = newPlayerId();
-  const r = await api('POST', '/wallets', { body: { playerId, currency: 'BRL', openingCredit: opening } });
+  const r = await api('POST', '/wallets', { body: { playerId, initialBalance: { amount: opening, currency: 'BRL' } } });
   if (r.status !== 201) throw new Error(`could not create the wallet (${r.status}: ${r.data?.error?.message ?? r.error ?? ''})`);
-  return { walletId: r.data.walletId, playerId, currency: 'BRL' };
+  return { walletId: r.data.id, playerId, currency: 'BRL' };
 }
 const txBody = (w, kind, amount, ext = `ext-${uid(6)}`, ref) => ({
-  providerId: PROVIDER, externalTransactionId: ext, kind, playerId: w.playerId, currency: w.currency, amount, roundId: 'r1',
-  ...(ref ? { referenceExternalId: ref } : {}),
+  providerId: PROVIDER, externalTransactionId: ext, kind, playerId: w.playerId, walletId: w.walletId,
+  money: { amount, currency: w.currency }, roundId: 'r1',
+  ...(kind === 'REFUND' || kind === 'ROLLBACK' ? {} : { gameId: 'fortune-chimp' }),
+  ...(ref ? { referenceExternalTransactionId: ref } : {}),
 });
-const post = (body) => api('POST', '/wagering/transactions', { body });
+const post = (body) =>
+  api('POST', '/wagering/transactions', { body, headers: { 'idempotency-key': `${body.providerId}:${body.externalTransactionId}` } });
 const count = (rs, status) => rs.filter((r) => r.status === status).length;
 
 const SCENARIOS = [
@@ -467,12 +474,12 @@ function buildScenarioCard(s) {
     async balance(w, expected, text) {
       const r = await api('GET', `/wallets/${w.walletId}`);
       if (r.status !== 200) return add('info', `balance check skipped (${r.status}: the token may lack wallet:read)`);
-      ctx.check(r.data.balance === expected, `${text} (got ${r.data.balance})`);
+      ctx.check(r.data.balance.amount === expected, `${text} (got ${r.data.balance.amount})`);
     },
     async reconcile(w) {
       const r = await api('POST', `/wallets/${w.walletId}/reconciliation`);
       if (r.status !== 200) return add('info', `ledger check skipped (${r.status}: the token may lack wallet:reconcile)`);
-      ctx.check(!r.data.divergent, `ledger agrees with the balance (stored ${r.data.storedBalance}, rebuilt from ${r.data.ledgerEntries} entries ${r.data.calculatedBalance})`);
+      ctx.check(r.data.consistent, `ledger agrees with the balance (stored ${r.data.storedBalance.amount}, rebuilt from ${r.data.checkedEntries} entries ${r.data.calculatedBalance.amount})`);
     },
   };
 

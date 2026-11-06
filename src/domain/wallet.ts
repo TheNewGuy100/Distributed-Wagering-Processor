@@ -13,6 +13,7 @@ export interface LedgerEntryDraft {
   readonly transactionId: string;
   readonly direction: LedgerDirection;
   readonly amount: Money;
+  readonly balanceBefore: Money;
   readonly balanceAfter: Money;
 }
 
@@ -95,7 +96,7 @@ export class Wallet {
     amount: Money,
     balanceAfter: Money,
   ): LedgerEntryDraft {
-    const entry: LedgerEntryDraft = { transactionId, direction, amount, balanceAfter };
+    const entry: LedgerEntryDraft = { transactionId, direction, amount, balanceBefore: this._balance, balanceAfter };
     this._balance = balanceAfter;
     this._version += 1;
     this._appliedTransactions.add(transactionId);

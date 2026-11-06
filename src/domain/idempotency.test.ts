@@ -6,10 +6,11 @@ const base: WagerPayload = {
   externalTransactionId: 't1',
   kind: 'BET',
   playerId: 'p1',
-  currency: 'BRL',
-  amount: '10.00',
+  walletId: '0192f291-27dd-7d3f-8071-5f8685deef37',
+  money: { amount: '10.00', currency: 'BRL' },
   roundId: 'r1',
-  referenceExternalId: null,
+  gameId: 'fortune-chimp',
+  referenceExternalTransactionId: null,
 };
 
 describe('payload hash', () => {
@@ -19,16 +20,17 @@ describe('payload hash', () => {
   });
   test('changes when any business field changes', () => {
     const h = payloadHash(base);
-    for (const [k, v] of [
-      ['amount', '10.01'],
-      ['kind', 'WIN'],
-      ['playerId', 'p2'],
-      ['roundId', 'r2'],
-      ['currency', 'USD'],
-      ['referenceExternalId', 'x'],
-    ] as const) {
-      expect(payloadHash({ ...base, [k]: v })).not.toBe(h);
-    }
+    const variants: WagerPayload[] = [
+      { ...base, money: { amount: '10.01', currency: 'BRL' } },
+      { ...base, money: { amount: '10.00', currency: 'USD' } },
+      { ...base, kind: 'WIN' },
+      { ...base, playerId: 'p2' },
+      { ...base, walletId: '0192f291-27dd-7d3f-8071-5f8685deef38' },
+      { ...base, roundId: 'r2' },
+      { ...base, gameId: 'other-game' },
+      { ...base, referenceExternalTransactionId: 'x' },
+    ];
+    for (const v of variants) expect(payloadHash(v)).not.toBe(h);
   });
   test('canonical JSON sorts nested keys and drops undefined', () => {
     expect(canonicalJson({ b: 1, a: { d: [2, { z: 1, y: 2 }], c: undefined } })).toBe('{"a":{"d":[2,{"y":2,"z":1}]},"b":1}');

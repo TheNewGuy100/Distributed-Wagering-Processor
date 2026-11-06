@@ -50,7 +50,7 @@ describe('pending reference worker', () => {
   test('a reversal that arrived first is applied once its reference shows up', async () => {
     const w = await createWallet(t, '50.00');
     const betExt = uid('bet');
-    const refund = await wager(t, w, { kind: 'REFUND', amount: '10.00', referenceExternalId: betExt });
+    const refund = await wager(t, w, { kind: 'REFUND', amount: '10.00', referenceExternalTransactionId: betExt });
     expect(refund.status).toBe(202);
 
     const worker = await bootApp(fast);
@@ -75,7 +75,7 @@ describe('pending reference worker', () => {
 
   test('after the retry limit the reversal is rejected with REFERENCE_NOT_FOUND', async () => {
     const w = await createWallet(t, '50.00');
-    const r = await wager(t, w, { kind: 'ROLLBACK', amount: '10.00', referenceExternalId: uid('never') });
+    const r = await wager(t, w, { kind: 'ROLLBACK', amount: '10.00', referenceExternalTransactionId: uid('never') });
     const worker = await bootApp(fast);
     try {
       const done = await waitFor(terminal(r.body.transactionId), 20000, 'exhaustion');
@@ -90,7 +90,7 @@ describe('pending reference worker', () => {
   test('a late reference that does not match is rejected, not applied', async () => {
     const w = await createWallet(t, '50.00');
     const betExt = uid('bet');
-    const r = await wager(t, w, { kind: 'REFUND', amount: '7.00', referenceExternalId: betExt });
+    const r = await wager(t, w, { kind: 'REFUND', amount: '7.00', referenceExternalTransactionId: betExt });
     await wager(t, w, { externalTransactionId: betExt, amount: '9.00' }); // amount differs
     const worker = await bootApp(fast);
     try {
@@ -106,7 +106,7 @@ describe('pending reference worker', () => {
     const w = await createWallet(t, '500.00');
     const pairs = Array.from({ length: 20 }, () => uid('bet'));
     const refunds = await Promise.all(
-      pairs.map((ext) => wager(t, w, { kind: 'REFUND', amount: '5.00', referenceExternalId: ext })),
+      pairs.map((ext) => wager(t, w, { kind: 'REFUND', amount: '5.00', referenceExternalTransactionId: ext })),
     );
     expect(refunds.every((r) => r.status === 202)).toBe(true);
     await Promise.all(pairs.map((ext) => wager(t, w, { externalTransactionId: ext, amount: '5.00' })));
@@ -135,10 +135,11 @@ describe('reconciliation', () => {
     const r = await api(t, 'POST', `/wallets/${w.walletId}/reconciliation`);
     expect(r.status).toBe(200);
     expect(r.body).toMatchObject({
-      divergent: false,
-      storedBalance: '78.50',
-      calculatedBalance: '78.50',
-      ledgerEntries: 3,
+      consistent: true,
+      storedBalance: { amount: '78.50', currency: 'BRL' },
+      calculatedBalance: { amount: '78.50', currency: 'BRL' },
+      difference: { amount: '0.00', currency: 'BRL' },
+      checkedEntries: 3,
       storedVersion: 3,
       differences: [],
       flaggedAt: null,
@@ -158,9 +159,10 @@ describe('reconciliation', () => {
 
     const r = await api(t, 'POST', `/wallets/${w.walletId}/reconciliation`);
     expect(r.status).toBe(200);
-    expect(r.body.divergent).toBe(true);
-    expect(r.body.storedBalance).toBe('97.00');
-    expect(r.body.calculatedBalance).toBe('90.00');
+    expect(r.body.consistent).toBe(false);
+    expect(r.body.storedBalance.amount).toBe('97.00');
+    expect(r.body.calculatedBalance.amount).toBe('90.00');
+    expect(r.body.difference.amount).toBe('7.00');
     expect(r.body.differences.join(' ')).toContain('stored balance 97.00 != ledger-derived balance 90.00');
     expect(r.body.flaggedAt).not.toBeNull();
     expect(metrics.get('wallet_reconciliation_divergences_total')).toBe(before + 1);
@@ -172,7 +174,7 @@ describe('reconciliation', () => {
     expect(String(logged[0]!.msg)).toContain('stored balance 97.00 != ledger-derived balance 90.00');
 
     const wallet = await api(t, 'GET', `/wallets/${w.walletId}`);
-    expect(wallet.body.balance).toBe('97.00'); // left exactly as found
+    expect(wallet.body.balance.amount).toBe('97.00'); // left exactly as found
     expect(wallet.body.flaggedAt).not.toBeNull();
     const again = await api(t, 'POST', `/wallets/${w.walletId}/reconciliation`);
     expect(again.body.flaggedAt).toBe(r.body.flaggedAt); // first flag time is preserved

@@ -63,6 +63,8 @@ describe('catalog: guarantees exist by name', () => {
       'wallets_balance_non_negative',
       'ledger_amount_positive',
       'ledger_balance_after_non_negative',
+      'ledger_balance_before_non_negative',
+      'ledger_balance_arithmetic',
       'ledger_direction_valid',
       'wager_tx_kind_valid',
       'wager_tx_status_valid',
@@ -98,7 +100,7 @@ describe('behaviour: the guarantees actually fire', () => {
       [txId, txId, txId, `schema-${walletId}`, walletId],
     );
     await em.execute(
-      `insert into ledger_entries (id, wallet_id, transaction_id, direction, amount, balance_after) values (?, ?, ?, 'CREDIT', 10, 10)`,
+      `insert into ledger_entries (id, wallet_id, transaction_id, direction, amount, balance_before, balance_after) values (?, ?, ?, 'CREDIT', 10, 0, 10)`,
       [crypto.randomUUID(), walletId, txId],
     );
   });
@@ -107,6 +109,15 @@ describe('behaviour: the guarantees actually fire', () => {
     await expect(q(`update ledger_entries set amount = 1 where wallet_id = ?`, [walletId])).rejects.toThrow(/append-only/);
     await expect(q(`delete from ledger_entries where wallet_id = ?`, [walletId])).rejects.toThrow(/append-only/);
     await expect(q(`truncate ledger_entries`)).rejects.toThrow(/append-only/);
+  });
+
+  test('a ledger entry whose balances do not add up is rejected by the database itself', async () => {
+    const bad = (dir: string, before: number, after: number) =>
+      q(`insert into ledger_entries (id, wallet_id, transaction_id, direction, amount, balance_before, balance_after) values (?, ?, ?, ?, 10, ?, ?)`, [
+        crypto.randomUUID(), walletId, txId, dir, before, after,
+      ]);
+    await expect(bad('CREDIT', 5, 20)).rejects.toThrow(/ledger_balance_arithmetic/);
+    await expect(bad('DEBIT', 50, 50)).rejects.toThrow(/ledger_balance_arithmetic/);
   });
 
   test('a negative balance is rejected by the database itself', async () => {

@@ -2,6 +2,8 @@ import { EntityManager } from '@mikro-orm/postgresql';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { DomainError } from '../../domain/errors';
 import { IdempotencyConflictError, ValidationError, WalletNotFoundError } from '../errors';
+import { asObject, requiredString } from '../validation';
+import { LogContext } from '../../infrastructure/observability/log-context';
 import { MetricsService } from '../../infrastructure/observability/metrics.service';
 import { InboxMessage } from '../../infrastructure/persistence/entities';
 import { insertIgnoringConflict } from '../../infrastructure/persistence/orm-helpers';
@@ -24,6 +26,19 @@ export class ConsumerHooks {
 export interface InboundMessage {
   messageId: string;
   body: string;
+}
+
+export const MESSAGE_TYPE = 'WagerTransactionRequested';
+
+/**
+ * Queue message envelope: `{ messageId, type, occurredAt, data }`. The business `messageId` (not the broker's) is the
+ * inbox key, so a producer that re-sends the same logical message with a new broker id is still deduplicated.
+ */
+function parseEnvelope(raw: unknown): { messageId: string; data: Record<string, unknown> } {
+  const o = asObject(raw);
+  const messageId = requiredString(o, 'messageId', 255);
+  if (o.type !== MESSAGE_TYPE) throw new ValidationError(`type must be ${MESSAGE_TYPE}`);
+  return { messageId, data: asObject(o.data) };
 }
 
 const isTransientInfra = (e: unknown): boolean => {
@@ -53,11 +68,16 @@ export class WagerMessageHandler {
 
   async handle(msg: InboundMessage): Promise<MessageOutcome> {
     let cmd;
+    let inboxId: string;
     try {
-      cmd = parseWagerCommand(JSON.parse(msg.body));
+      const env = parseEnvelope(JSON.parse(msg.body));
+      inboxId = env.messageId;
+      const data = env.data;
+      cmd = parseWagerCommand(data, typeof data.idempotencyKey === 'string' ? data.idempotencyKey : undefined);
     } catch (e) {
       return { kind: 'DLQ', reason: e instanceof ValidationError ? e.message : 'malformed message body' };
     }
+    LogContext.set({ messageId: inboxId });
 
     let outcome: MessageOutcome;
     const start = performance.now();
@@ -68,7 +88,7 @@ export class WagerMessageHandler {
         const claimed = await insertIgnoringConflict(
           tx,
           InboxMessage,
-          { consumer: CONSUMER_NAME, messageId: msg.messageId },
+          { consumer: CONSUMER_NAME, messageId: inboxId },
           'messageId',
         );
         if (!claimed) return { kind: 'ACK', reason: 'duplicate' } as const;
@@ -88,7 +108,7 @@ export class WagerMessageHandler {
     }
 
     // Committed. A crash from here on is exactly the "worker died before ack" case.
-    await this.hooks.afterCommit?.(msg.messageId);
+    await this.hooks.afterCommit?.(inboxId);
     return outcome;
   }
 

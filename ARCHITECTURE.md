@@ -134,8 +134,8 @@ truncating the ledger, a negative balance and a second reversal are all rejected
 | Table | Role | Invariants enforced by the database |
 |---|---|---|
 | `wallets` | Aggregate root | `CHECK balance >= 0`; `UNIQUE (player_id, currency)`; `version` bigint |
-| `wager_transactions` | One row per external transaction; also the idempotency record | `UNIQUE (provider_id, external_transaction_id)`; `UNIQUE (idempotency_key)`; status/kind `CHECK`s; reversals must carry a reference; **partial unique index: a processed transaction has at most one processed reversal** |
-| `ledger_entries` | Append-only audit trail | `UNIQUE (wallet_id, transaction_id)` (one entry per wallet per transaction); `amount > 0`; `balance_after >= 0`; **row trigger on `UPDATE`/`DELETE` and statement trigger on `TRUNCATE` raise** |
+| `wager_transactions` | One row per external transaction; also the idempotency record | `UNIQUE (provider_id, external_transaction_id)`; `UNIQUE (idempotency_key)`; status/kind `CHECK`s; `game_id` (indexed with `created_at`) and `balance_after`, the balance observed when it settled, which a replay returns verbatim; reversals must carry a reference; **partial unique index: a processed transaction has at most one processed reversal** |
+| `ledger_entries` | Append-only audit trail | `UNIQUE (wallet_id, transaction_id)` (one entry per wallet per transaction); `amount > 0`; `balance_before >= 0`, `balance_after >= 0` and `balance_after = balance_before ± amount` (an entry that does not add up cannot be inserted); **row trigger on `UPDATE`/`DELETE` and statement trigger on `TRUNCATE` raise** |
 | `inbox_messages` | Consumer-side dedup | `PRIMARY KEY (consumer, message_id)` |
 | `outbox_events` | Transactional outbox | `seq` sequence (publish order), partial indexes on unpublished rows |
 
@@ -158,7 +158,7 @@ a `REFUND` followed by a `ROLLBACK` of the same bet would return the stake twice
 
 `ProcessWagerTransaction` runs one SQL transaction (shared by HTTP, SQS and the retry worker via `settleTransaction`):
 
-1. **Lock the wallet row** (`SELECT … FOR UPDATE`, found by player and currency). This serialises every balance
+1. **Lock the wallet row** (`SELECT … FOR UPDATE`, found by the `walletId` of the request, which must belong to the request's `playerId`; a currency different from the wallet's is a business rejection `CURRENCY_MISMATCH`). This serialises every balance
    change of one wallet, with no global lock: other wallets proceed in parallel.
 2. **Claim the idempotency key**: `INSERT … ON CONFLICT DO NOTHING`. A concurrent duplicate blocks on the unique
    index until the first commits, then sees the conflict.
@@ -177,8 +177,8 @@ documented where the lock is taken (`lockWalletByPlayer`).
 ### Idempotency
 
 Key = `Idempotency-Key` header, default `{providerId}:{externalTransactionId}`. The payload hash is SHA-256 of the
-canonical JSON (sorted keys) of the business fields only (provider, external id, kind, player, currency, amount,
-round, reference). Same key and hash returns the stored result with `idempotentReplay: true` (the status code reflects
+canonical JSON (sorted keys) of the business fields only (provider, external id, kind, player, wallet, `money`,
+round, game, reference). Same key and hash returns the stored result with `idempotentReplay: true` (the status code reflects
 the stored outcome); same key or external id with a different hash is `409 IDEMPOTENCY_CONFLICT`. All state is in
 PostgreSQL: there is no in-memory idempotency anywhere, and a restart or another instance changes nothing.
 
@@ -193,9 +193,10 @@ reference that does not match (amount, round, player, provider, currency, wallet
 
 ## 6. SQS consumer
 
-* Same JSON as the HTTP body. The handler runs **inbox insert + business transaction in one SQL transaction**, so a
+* Envelope `{messageId, type, occurredAt, data}`; `data` is the HTTP body plus `idempotencyKey`. The inbox key is the
+  business `messageId`, so a producer that re-sends the same logical message under a new broker id is still absorbed. The handler runs **inbox insert + business transaction in one SQL transaction**, so a
   message is applied and recorded together or not at all. Ack (delete) happens only after commit.
-* A duplicated *message* is absorbed by the inbox (`consumer, MessageId`); a duplicated *business transaction* sent
+* A duplicated *message* is absorbed by the inbox (`consumer, messageId`); a duplicated *business transaction* sent
   as a different message is absorbed by idempotency. Two independent layers, neither relies on FIFO ordering.
 * Classification: **business** errors (idempotency conflict, domain errors) → ack; **permanent** (unparseable,
   invalid) → explicit send to the DLQ, then ack; **transient** (database errors, wallet not found yet, anything
@@ -232,8 +233,11 @@ timestamp would be the transaction *start* time and could invert). A row is only
 row of the same aggregate exists, so concurrent publishers never overtake each other within a wallet; the SQS message
 group is the aggregate id. `WalletBalanceChanged` also carries `walletVersion` so a consumer can reorder or detect gaps.
 
-Events are an abstract `DomainEvent` envelope (`eventId`, `eventType`, `version`, `aggregateId`, `occurredAt`,
-`data`) with typed subclasses; money is always a string. `WalletBalanceChanged` is emitted only when the balance
+Events are an abstract `DomainEvent` envelope (`eventId`, `eventType`, `version`, `aggregateId`, `correlationId`,
+`causationId`, `occurredAt`, `data`) with typed subclasses. `correlationId` is the request's (or message's) and ties all
+events of one operation together; `causationId` is the queue `messageId` when there is one, otherwise the transaction.
+Money in `data` is always `{amount, currency}` with a decimal string; `WalletBalanceChanged` carries `money`,
+`balanceBefore`, `balanceAfter` and `walletVersion`, and the transaction events carry `roundId` and `gameId`. `WalletBalanceChanged` is emitted only when the balance
 changes (never for `LOSS` or rejections).
 
 ## 8. Reconciliation

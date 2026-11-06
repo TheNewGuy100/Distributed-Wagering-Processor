@@ -10,7 +10,7 @@ afterAll(() => t.close());
 
 describe('authentication extension point', () => {
   test('default (noop) authenticator lets requests through', async () => {
-    expect((await api(t, 'POST', '/wallets', { playerId: `p-${crypto.randomUUID()}`, currency: 'BRL' })).status).toBe(201);
+    expect((await api(t, 'POST', '/wallets', { playerId: `p-${crypto.randomUUID()}`, initialBalance: { amount: '0.00', currency: 'BRL' } })).status).toBe(201);
   });
 
   test('a real authenticator can be plugged in: protected routes need it, probes and metrics stay open', async () => {

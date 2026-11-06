@@ -6,10 +6,11 @@ export interface WagerPayload {
   externalTransactionId: string;
   kind: string;
   playerId: string;
-  currency: string;
-  amount: string; // canonical decimal string, e.g. "10.00"
+  walletId: string;
+  money: { amount: string; currency: string }; // amount is a canonical decimal string, e.g. "10.00"
   roundId: string | null;
-  referenceExternalId: string | null;
+  gameId: string | null;
+  referenceExternalTransactionId: string | null;
 }
 
 /** Deterministic JSON: object keys sorted recursively, no whitespace. */

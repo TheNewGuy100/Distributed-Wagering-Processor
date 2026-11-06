@@ -37,6 +37,19 @@ export function currencyField(o: Record<string, unknown>): string {
   return c;
 }
 
+/** Reads a `{ amount: "10.00", currency: "BRL" }` object (the wire format of money). */
+export function moneyProps(value: unknown, field: string): Money {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new ValidationError(`${field} must be an object { amount, currency }`);
+  }
+  const o = value as Record<string, unknown>;
+  const c = o.currency;
+  if (typeof c !== 'string' || !/^[A-Z]{3}$/.test(c)) {
+    throw new ValidationError(`${field}.currency must be a 3-letter uppercase code`);
+  }
+  return moneyField(o.amount, c, `${field}.amount`);
+}
+
 export function moneyField(value: unknown, currency: string, field: string): Money {
   try {
     return Money.parse(value, currency);

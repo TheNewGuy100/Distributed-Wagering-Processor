@@ -1,14 +1,22 @@
 import type { EntityManager } from '@mikro-orm/postgresql';
 import type { DomainEvent } from '../../domain/events';
+import { LogContext } from '../observability/log-context';
 import { OutboxEvent } from '../persistence/entities';
 
-const toRow = (event: DomainEvent) => ({
-  id: event.eventId,
-  aggregateId: event.aggregateId,
-  eventType: event.eventType,
-  version: event.version,
-  payload: event.toEnvelope(),
-});
+const toRow = (event: DomainEvent) => {
+  const ctx = LogContext.get();
+  const transactionId = typeof event.data.transactionId === 'string' ? event.data.transactionId : undefined;
+  return {
+    id: event.eventId,
+    aggregateId: event.aggregateId,
+    eventType: event.eventType,
+    version: event.version,
+    payload: event.toEnvelope({
+      correlationId: String(ctx.correlationId ?? ctx.transactionId ?? event.eventId),
+      causationId: String(ctx.messageId ?? transactionId ?? '') || undefined,
+    }),
+  };
+};
 
 /**
  * Appends events to the outbox using the caller's transaction, so they commit atomically with the change.

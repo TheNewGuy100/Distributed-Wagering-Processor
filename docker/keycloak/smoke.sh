@@ -27,8 +27,8 @@ status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 expect() { # description, expected, actual
   if [ "$2" = "$3" ]; then echo "  ok   $1 -> $3"; else echo "  FAIL $1 -> got $3, expected $2"; exit 1; fi
 }
-bet() { # provider id, external id
-  echo "{\"providerId\":\"$1\",\"externalTransactionId\":\"$2\",\"kind\":\"BET\",\"playerId\":\"kc-$run\",\"currency\":\"BRL\",\"amount\":\"5.00\",\"roundId\":\"r1\"}"
+bet() { # provider id, external id (uses the wallet id in $wid)
+  echo "{\"providerId\":\"$1\",\"externalTransactionId\":\"$2\",\"kind\":\"BET\",\"playerId\":\"kc-$run\",\"walletId\":\"$wid\",\"money\":{\"amount\":\"5.00\",\"currency\":\"BRL\"},\"roundId\":\"r1\",\"gameId\":\"fortune-chimp\"}"
 }
 
 ACME=$(token provider-acme acme-dev-secret)
@@ -45,14 +45,14 @@ expect "metrics stay public" 200 "$(status "$API/metrics")"
 
 echo "Authorization"
 wallet=$(curl -fsS -X POST "$API/wallets" -H "$json" -H "authorization: Bearer $OPS" \
-  -d "{\"playerId\":\"kc-$run\",\"currency\":\"BRL\",\"openingCredit\":\"100.00\"}")
-wid=$(echo "$wallet" | grep -o '"walletId":"[^"]*"' | cut -d'"' -f4)
+  -d "{\"playerId\":\"kc-$run\",\"initialBalance\":{\"amount\":\"100.00\",\"currency\":\"BRL\"}}")
+wid=$(echo "$wallet" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
 echo "  ok   ops-admin created a wallet"
-expect "acme books a bet as acme" 201 "$(status -X POST "$API/wagering/transactions" -H "$json" -H "authorization: Bearer $ACME" -d "$(bet acme "kc-a-$run")")"
-expect "acme tries to book as globex" 403 "$(status -X POST "$API/wagering/transactions" -H "$json" -H "authorization: Bearer $ACME" -d "$(bet globex "kc-b-$run")")"
+expect "acme books a bet as acme" 201 "$(status -X POST "$API/wagering/transactions" -H "$json" -H "authorization: Bearer $ACME" -H "idempotency-key: acme:kc-a-$run" -d "$(bet acme "kc-a-$run")")"
+expect "acme tries to book as globex" 403 "$(status -X POST "$API/wagering/transactions" -H "$json" -H "authorization: Bearer $ACME" -H "idempotency-key: globex:kc-b-$run" -d "$(bet globex "kc-b-$run")")"
 expect "globex reads acme's transaction" 403 "$(status "$API/providers/acme/wagering/transactions/kc-a-$run" -H "authorization: Bearer $GLOBEX")"
 expect "acme reads a wallet (no wallet:read)" 403 "$(status "$API/wallets/$wid" -H "authorization: Bearer $ACME")"
-balance=$(curl -fsS "$API/wallets/$wid" -H "authorization: Bearer $OPS" | grep -o '"balance":"[^"]*"' | cut -d'"' -f4)
+balance=$(curl -fsS "$API/wallets/$wid" -H "authorization: Bearer $OPS" | grep -o '"amount":"[^"]*"' | head -1 | cut -d'"' -f4)
 expect "only the allowed bet was booked" 95.00 "$balance"
 
 echo "All checks passed."

@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { ConsumerHooks } from '../../src/application/wager/wager-message-handler';
 import { SqsQueues } from '../../src/infrastructure/sqs/sqs-queues.service';
-import { api, bootApp, createWallet, expectLedgerConsistent, uid, type TestApp } from './helpers';
+import { api, bootApp, createWallet, expectLedgerConsistent, uid, wagerBody as baseWagerBody, type TestApp } from './helpers';
 
 const suffix = Date.now().toString(36);
 const env = {
@@ -42,22 +42,22 @@ afterAll(async () => {
   sqs.destroy();
 });
 
-const wagerBody = (w: { playerId: string; currency: string }, over: Record<string, unknown> = {}) => ({
-  providerId: 'prov-q',
-  externalTransactionId: uid('ext'),
-  kind: 'BET',
-  playerId: w.playerId,
-  currency: w.currency,
-  amount: '10.00',
-  roundId: 'r1',
-  ...over,
+const wagerBody = (w: { playerId: string; walletId: string; currency: string }, over: Record<string, unknown> = {}) =>
+  baseWagerBody(w, { providerId: 'prov-q', ...over }) as Record<string, any>;
+
+/** The queue message envelope of the challenge: { messageId, type, occurredAt, data } (data carries the idempotency key). */
+const envelope = (data: Record<string, any>, messageId = uid('msg')) => ({
+  messageId,
+  type: 'WagerTransactionRequested',
+  occurredAt: new Date().toISOString(),
+  data: { idempotencyKey: `${data.providerId}:${data.externalTransactionId}`, ...data },
 });
 
-const send = (body: unknown, group: string, raw?: string) =>
+const send = (body: unknown, group: string, raw?: string, messageId?: string) =>
   sqs.send(
     new SendMessageCommand({
       QueueUrl: mainUrl,
-      MessageBody: raw ?? JSON.stringify(body),
+      MessageBody: raw ?? JSON.stringify(envelope(body as Record<string, any>, messageId)),
       MessageGroupId: group,
       MessageDeduplicationId: randomUUID(),
     }),
@@ -176,7 +176,7 @@ describe('SQS consumer', () => {
     const w = await createWallet(t, '100.00');
     const marker = uid('poison');
     await send(null, w.playerId, `{"not json" ${marker}`);
-    const bad = wagerBody(w, { amount: 10.5, externalTransactionId: marker });
+    const bad = wagerBody(w, { externalTransactionId: marker, money: { amount: 10.5, currency: 'BRL' } });
     await send(bad, w.playerId);
 
     const malformed = await findInDlq((b) => b.includes(marker) && b.startsWith('{"not json"'));
@@ -191,7 +191,7 @@ describe('SQS consumer', () => {
     const body = wagerBody(w);
     await send(body, w.playerId);
     await waitFor(() => txByExternal(body.externalTransactionId));
-    await send({ ...body, amount: '99.00' }, w.playerId); // same id, different payload -> idempotency conflict
+    await send({ ...body, money: { amount: '99.00', currency: 'BRL' } }, w.playerId); // same id, different payload -> idempotency conflict
     await send(wagerBody(w, { amount: '500.00' }), w.playerId); // insufficient funds -> REJECTED, committed
     await waitFor(async () => (await queueDepth()) === 0, 15000, 'queue drained');
     expect(await expectLedgerConsistent(t, w.walletId)).toEqual({ balance: '90.00', entries: 2 });
@@ -199,19 +199,30 @@ describe('SQS consumer', () => {
 
   test('transient failure is retried with backoff and succeeds once the cause is gone', async () => {
     const playerId = uid('late');
-    const body = wagerBody({ playerId, currency: 'BRL' });
-    await send(body, playerId); // wallet does not exist yet
+    const walletId = randomUUID();
+    const body = wagerBody({ playerId, walletId, currency: 'BRL' }, { kind: 'WIN', amount: '25.00' });
+    await send(body, playerId); // the wallet does not exist yet
     await Bun.sleep(1200);
-    const w = await api(t, 'POST', '/wallets', { playerId, currency: 'BRL', openingCredit: '40.00' });
-    expect(w.status).toBe(201);
+    await t.orm.em.fork().execute('insert into wallets (id, player_id, currency) values (?, ?, ?)', [walletId, playerId, 'BRL']);
     const tx = await waitFor(() => txByExternal(body.externalTransactionId), 20000, 'retried transaction');
     expect(tx.status).toBe('PROCESSED');
-    expect(await expectLedgerConsistent(t, w.body.walletId)).toEqual({ balance: '30.00', entries: 2 });
+    expect(await expectLedgerConsistent(t, walletId)).toEqual({ balance: '25.00', entries: 1 });
+  });
+
+  test('the same messageId sent twice is deduplicated by the inbox', async () => {
+    const w = await createWallet(t, '100.00');
+    const body = wagerBody(w);
+    const messageId = uid('same-msg');
+    await send(body, w.playerId, undefined, messageId);
+    await send({ ...body, externalTransactionId: uid('other') }, w.playerId, undefined, messageId); // new content, same messageId
+    await waitFor(async () => (await queueDepth()) === 0 && (await txByExternal(body.externalTransactionId)), 20000);
+    expect(await inboxCount(messageId)).toBe(1);
+    expect(await expectLedgerConsistent(t, w.walletId)).toEqual({ balance: '90.00', entries: 2 }); // only the first applied
   });
 
   test('retries are bounded: exhausted messages land in the DLQ', async () => {
     const marker = uid('ghost');
-    await send(wagerBody({ playerId: marker, currency: 'BRL' }, { externalTransactionId: marker }), marker);
+    await send(wagerBody({ playerId: marker, walletId: randomUUID(), currency: 'BRL' }, { externalTransactionId: marker }), marker);
     const dead = await findInDlq((b) => b.includes(marker), 40000);
     expect(dead.reason).toContain('retries exhausted');
   }, 60000);

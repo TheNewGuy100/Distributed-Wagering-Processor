@@ -110,6 +110,7 @@ export class PendingReferenceWorker implements OnApplicationBootstrap, BeforeApp
           currency: row.currency,
           amount: Money.parse(row.amount, row.currency),
           roundId: row.roundId ?? null,
+          gameId: row.gameId ?? null,
           referenceExternalId: row.referenceExternalId ?? null,
           fromStatus: 'PENDING_REFERENCE',
           retryCount: row.retryCount,

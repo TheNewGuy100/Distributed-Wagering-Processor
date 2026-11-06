@@ -2,7 +2,13 @@ import { defaultIdempotencyKey, payloadHash } from '../../domain/idempotency';
 import type { Money } from '../../domain/money';
 import type { TransactionKind } from '../../domain/wager-rules';
 import { ValidationError } from '../errors';
-import { asObject, currencyField, moneyField, optionalString, requiredString } from '../validation';
+import {
+  asObject,
+  assertUuid,
+  moneyProps,
+  optionalString,
+  requiredString,
+} from '../validation';
 
 export const EXTERNAL_KINDS = ['BET', 'WIN', 'LOSS', 'REFUND', 'ROLLBACK'] as const;
 
@@ -11,16 +17,27 @@ export interface ProcessWagerCommand {
   externalTransactionId: string;
   kind: TransactionKind;
   playerId: string;
+  walletId: string;
   currency: string;
   amount: Money;
   roundId: string | null;
+  /** Which game the round belongs to. Required for BET, WIN and LOSS; reversals inherit it from their reference. */
+  gameId: string | null;
   referenceExternalId: string | null;
   idempotencyKey: string;
   payloadHash: string;
 }
 
-/** Validates an untrusted request body (HTTP or queue message) into a command. */
-export function parseWagerCommand(body: unknown, idempotencyKeyHeader?: string | null): ProcessWagerCommand {
+/**
+ * Validates an untrusted request body (HTTP, or the `data` of a queue message) into a command.
+ * The `Idempotency-Key` is mandatory and is the source of truth for deduplication.
+ */
+export function parseWagerCommand(body: unknown, idempotencyKey: string | undefined | null): ProcessWagerCommand {
+  if (idempotencyKey === undefined || idempotencyKey === null || idempotencyKey.trim() === '') {
+    throw new ValidationError('Idempotency-Key is required');
+  }
+  if (idempotencyKey.length > 255) throw new ValidationError('Idempotency-Key must be 1-255 characters');
+
   const o = asObject(body);
   const providerId = requiredString(o, 'providerId');
   const externalTransactionId = requiredString(o, 'externalTransactionId', 255);
@@ -29,28 +46,23 @@ export function parseWagerCommand(body: unknown, idempotencyKeyHeader?: string |
     throw new ValidationError(`kind must be one of ${EXTERNAL_KINDS.join(', ')}`);
   }
   const playerId = requiredString(o, 'playerId');
-  const currency = currencyField(o);
-  const amount = moneyField(o.amount, currency, 'amount');
+  const walletId = assertUuid(requiredString(o, 'walletId'), 'walletId');
+  const amount = moneyProps(o.money, 'money');
+  const currency = amount.currency;
   const roundId = optionalString(o, 'roundId');
-  const referenceExternalId = optionalString(o, 'referenceExternalId', 255);
+  const gameId = optionalString(o, 'gameId');
+  const referenceExternalId = optionalString(o, 'referenceExternalTransactionId', 255);
 
   const isReversal = kind === 'REFUND' || kind === 'ROLLBACK';
   if (isReversal && referenceExternalId === null) {
-    throw new ValidationError(`referenceExternalId is required for ${kind}`);
+    throw new ValidationError(`referenceExternalTransactionId is required for ${kind}`);
   }
   if (!isReversal && referenceExternalId !== null) {
-    throw new ValidationError('referenceExternalId is only allowed for REFUND and ROLLBACK');
+    throw new ValidationError('referenceExternalTransactionId is only allowed for REFUND and ROLLBACK');
   }
+  if (!isReversal && gameId === null) throw new ValidationError(`gameId is required for ${kind}`);
   if (referenceExternalId === externalTransactionId) {
     throw new ValidationError('a transaction cannot reference itself');
-  }
-
-  let idempotencyKey = defaultIdempotencyKey(providerId, externalTransactionId);
-  if (idempotencyKeyHeader !== undefined && idempotencyKeyHeader !== null) {
-    if (idempotencyKeyHeader.trim() === '' || idempotencyKeyHeader.length > 255) {
-      throw new ValidationError('Idempotency-Key must be 1-255 characters');
-    }
-    idempotencyKey = idempotencyKeyHeader;
   }
 
   return {
@@ -58,20 +70,26 @@ export function parseWagerCommand(body: unknown, idempotencyKeyHeader?: string |
     externalTransactionId,
     kind: kind as TransactionKind,
     playerId,
+    walletId,
     currency,
     amount,
     roundId,
+    gameId,
     referenceExternalId,
     idempotencyKey,
+    // Business fields only: the Idempotency-Key header and transport metadata are not part of the hash.
     payloadHash: payloadHash({
       providerId,
       externalTransactionId,
       kind,
       playerId,
-      currency,
-      amount: amount.toString(),
+      walletId,
+      money: { amount: amount.toString(), currency },
       roundId,
-      referenceExternalId,
+      gameId,
+      referenceExternalTransactionId: referenceExternalId,
     }),
   };
 }
+
+export { defaultIdempotencyKey };

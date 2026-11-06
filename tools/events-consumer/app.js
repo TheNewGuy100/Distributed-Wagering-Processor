@@ -38,9 +38,9 @@ let last = 0;
 
 function summary(e) {
   const d = e.data ?? {};
-  if (e.eventType === 'WalletBalanceChanged') return `${d.direction} ${d.amount} → ${d.balanceAfter} (wallet v${d.walletVersion})`;
-  if (e.eventType === 'WagerTransactionRejected') return `${d.kind} ${d.amount} rejected: ${d.failureCode}`;
-  if (d.kind) return `${d.kind} ${d.amount} ${d.currency ?? ''}`.trim();
+  if (e.eventType === 'WalletBalanceChanged') return `${d.direction} ${d.money?.amount} (${d.balanceBefore?.amount} → ${d.balanceAfter?.amount}, wallet v${d.walletVersion})`;
+  if (e.eventType === 'WagerTransactionRejected') return `${d.kind} ${d.money?.amount} rejected: ${d.failureCode}`;
+  if (d.kind) return `${d.kind} ${d.money?.amount ?? ''} ${d.money?.currency ?? ''}${d.gameId ? ' · ' + d.gameId : ''}`.trim();
   return e.reason ?? '';
 }
 

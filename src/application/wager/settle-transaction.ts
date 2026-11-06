@@ -36,6 +36,7 @@ export interface SettleInput {
   currency: string;
   amount: Money;
   roundId: string | null;
+  gameId: string | null;
   referenceExternalId: string | null;
   /** Status the stored row currently has. */
   fromStatus: 'PENDING' | 'PENDING_REFERENCE';
@@ -46,6 +47,8 @@ export interface SettleInput {
 export interface SettleOutcome {
   status: TransactionStatus;
   failureCode: string | null;
+  /** Wallet balance after this settlement (unchanged for rejections and pending references). */
+  balance: Money;
   /** Final values of the row, so callers can build the response without reading it back. */
   retryCount: number;
   nextRetryAt: Date | null;
@@ -116,8 +119,9 @@ export async function settleTransaction(
     externalTransactionId: s.externalTransactionId,
     kind: s.kind,
     walletId: wallet.id,
-    amount: s.amount.toString(),
-    currency: s.currency,
+    roundId: s.roundId,
+    gameId: s.gameId,
+    money: { amount: s.amount.toString(), currency: s.currency },
   };
 
   if (retry) {
@@ -125,7 +129,13 @@ export async function settleTransaction(
     await tx.nativeUpdate(
       WagerTransaction,
       { id: s.transactionId },
-      { status: 'PENDING_REFERENCE', retryCount: retry.retryCount, nextRetryAt: retry.at, updatedAt },
+      {
+        status: 'PENDING_REFERENCE',
+        retryCount: retry.retryCount,
+        nextRetryAt: retry.at,
+        balanceAfter: wallet.balance.toString(),
+        updatedAt,
+      },
     );
     // Announce the wait once; later reschedules are internal bookkeeping.
     if (s.fromStatus === 'PENDING') {
@@ -136,6 +146,7 @@ export async function settleTransaction(
     return {
       status: 'PENDING_REFERENCE',
       failureCode: null,
+      balance: wallet.balance,
       retryCount: retry.retryCount,
       nextRetryAt: retry.at,
       updatedAt,
@@ -157,6 +168,7 @@ export async function settleTransaction(
       status,
       failureCode,
       nextRetryAt: null,
+      balanceAfter: wallet.balance.toString(),
       referenceTransaction: processed ? (reference?.id ?? null) : null,
       updatedAt,
     },
@@ -171,9 +183,9 @@ export async function settleTransaction(
           walletId: wallet.id,
           transactionId: s.transactionId,
           direction: entry.direction,
-          amount: entry.amount.toString(),
-          balanceAfter: entry.balanceAfter.toString(),
-          currency: s.currency,
+          money: { amount: entry.amount.toString(), currency: s.currency },
+          balanceBefore: { amount: entry.balanceBefore.toString(), currency: s.currency },
+          balanceAfter: { amount: entry.balanceAfter.toString(), currency: s.currency },
           walletVersion: wallet.version,
         }),
       );
@@ -183,5 +195,5 @@ export async function settleTransaction(
   }
   await enqueueEvents(tx, events);
 
-  return { status, failureCode, retryCount: s.retryCount, nextRetryAt: null, updatedAt };
+  return { status, failureCode, balance: wallet.balance, retryCount: s.retryCount, nextRetryAt: null, updatedAt };
 }

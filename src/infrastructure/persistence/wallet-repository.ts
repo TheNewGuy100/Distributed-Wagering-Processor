@@ -59,6 +59,7 @@ export async function persistWalletChanges(
       transaction: e.transactionId,
       direction: e.direction,
       amount: e.amount.toString(),
+      balanceBefore: e.balanceBefore.toString(),
       balanceAfter: e.balanceAfter.toString(),
     });
   }

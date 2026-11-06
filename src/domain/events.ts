@@ -13,16 +13,28 @@ export abstract class DomainEvent<TData extends Record<string, unknown> = Record
     readonly occurredAt: Date = new Date(),
   ) {}
 
-  toEnvelope() {
+  /**
+   * `correlationId` ties every event of one request/message together; `causationId` is what directly caused this
+   * event (the queue message when there is one, otherwise the transaction).
+   */
+  toEnvelope(ctx: { correlationId: string; causationId?: string }) {
     return {
       eventId: this.eventId,
       eventType: this.eventType,
       version: this.version,
       aggregateId: this.aggregateId,
+      correlationId: ctx.correlationId,
+      ...(ctx.causationId ? { causationId: ctx.causationId } : {}),
       occurredAt: this.occurredAt.toISOString(),
       data: this.data,
     };
   }
+}
+
+/** Decimal string + currency; never a number. */
+export interface MoneyProps {
+  amount: string;
+  currency: string;
 }
 
 interface TxData extends Record<string, unknown> {
@@ -31,8 +43,9 @@ interface TxData extends Record<string, unknown> {
   externalTransactionId: string;
   kind: string;
   walletId: string | null;
-  amount: string;
-  currency: string;
+  roundId: string | null;
+  gameId: string | null;
+  money: MoneyProps;
 }
 
 export class WagerTransactionProcessed extends DomainEvent<TxData> {
@@ -55,9 +68,9 @@ export class WalletBalanceChanged extends DomainEvent<{
   walletId: string;
   transactionId: string;
   direction: 'CREDIT' | 'DEBIT';
-  amount: string;
-  balanceAfter: string;
-  currency: string;
+  money: MoneyProps;
+  balanceBefore: MoneyProps;
+  balanceAfter: MoneyProps;
   walletVersion: number;
 }> {
   readonly eventType = 'WalletBalanceChanged';

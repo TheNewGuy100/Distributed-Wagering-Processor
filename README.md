@@ -76,10 +76,12 @@ their rows and queues. The test helpers detect an instance on port 3000 and stop
 
 ```bash
 curl -s -X POST localhost:3000/wallets -H 'content-type: application/json' \
-  -d '{"playerId":"p1","currency":"BRL","openingCredit":"100.00"}'
+  -d '{"playerId":"p1","initialBalance":{"amount":"100.00","currency":"BRL"}}'
+# → {"id":"<walletId>","playerId":"p1","balance":{"amount":"100.00","currency":"BRL"},"version":1,...}
 
 curl -s -X POST localhost:3000/wagering/transactions -H 'content-type: application/json' \
-  -d '{"providerId":"acme","externalTransactionId":"bet-1","kind":"BET","playerId":"p1","currency":"BRL","amount":"10.00","roundId":"r1"}'
+  -H 'Idempotency-Key: acme:bet-1' \
+  -d '{"providerId":"acme","externalTransactionId":"bet-1","playerId":"p1","walletId":"<walletId>","roundId":"r1","gameId":"fortune-chimp","kind":"BET","money":{"amount":"10.00","currency":"BRL"}}'
 ```
 
 ## Commands
@@ -108,11 +110,11 @@ All money is a decimal string with two places (`"10.00"`); JSON numbers are reje
 
 | Method & path | Notes |
 |---|---|
-| `POST /wallets` | `{playerId, currency, openingCredit?}`. One wallet per player and currency (409 otherwise). The opening credit is booked in the same transaction. |
+| `POST /wallets` | `{playerId, initialBalance: {amount, currency}}`. Answers `{id, playerId, balance: {amount, currency}, version, ...}`. One wallet per player and currency (409 otherwise). A non-zero initial balance is booked as an `OPENING` transaction with a ledger `CREDIT` in the same SQL transaction. |
 | `GET /wallets/:walletId` | Balance, `version`, `flaggedAt`. |
 | `GET /wallets/:walletId/ledger?limit=&cursor=` | Opaque, stable cursor (ledger is append-only). |
 | `POST /wallets/:walletId/reconciliation` | Compares stored vs ledger-derived balance. Reports, logs, counts and flags divergences; never corrects them. |
-| `POST /wagering/transactions` | Header `Idempotency-Key` (default `{providerId}:{externalTransactionId}`). Body: `providerId, externalTransactionId, kind, playerId, currency, amount, roundId?, referenceExternalId?` (required for `REFUND`/`ROLLBACK`). |
+| `POST /wagering/transactions` | **Mandatory** header `Idempotency-Key` (recommended `{providerId}:{externalTransactionId}`; 400 without it). Body: `providerId, externalTransactionId, playerId, walletId, roundId, gameId, kind, money: {amount, currency}`, plus `referenceExternalTransactionId` for `REFUND`/`ROLLBACK`. `gameId` is required for `BET`/`WIN`/`LOSS` and stored on the transaction, so per-game reports need no extra registry. Answers `{transactionId, status, balance: {amount, currency}, idempotentReplay, ...}`; a replay returns the balance observed when the transaction was first settled. |
 | `GET /wagering/transactions/:transactionId` | |
 | `GET /providers/:providerId/wagering/transactions/:externalTransactionId` | |
 | `GET /health/live`, `GET /health/ready` | Liveness / readiness (PostgreSQL and SQS reachable). |
@@ -137,7 +139,9 @@ Errors look like `{"error": {"code": "...", "message": "..."}}`.
 
 ## SQS
 
-`wager-transactions.fifo` takes the same JSON body as the HTTP endpoint. Use the player (wallet) as `MessageGroupId`
+`wager-transactions.fifo` takes the envelope `{messageId, type: "WagerTransactionRequested", occurredAt, data}` where `data`
+is the HTTP body plus `idempotencyKey` (the header's counterpart, mandatory). The business `messageId` is the inbox key.
+Use the player (wallet) as `MessageGroupId`
 to keep per-wallet order; correctness does not depend on it. Optional message attribute `correlationId` is propagated
 to the logs. Poison messages and exhausted retries land in `wager-transactions-dlq.fifo` with a `FailureReason`
 attribute. Domain events are published to `wager-events.fifo` (see ARCHITECTURE.md).

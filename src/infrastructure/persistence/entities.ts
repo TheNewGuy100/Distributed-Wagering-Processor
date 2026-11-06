@@ -45,6 +45,10 @@ export const WagerTransaction = defineEntity({
     currency: p.string().columnType('char(3)'),
     amount: p.decimal('string').columnType('numeric(18,2)'),
     roundId: p.text().fieldName('round_id').nullable(),
+    /** Which game the round belongs to; there is no games registry, so this is the only handle for per-game reports. */
+    gameId: p.text().fieldName('game_id').nullable(),
+    /** Wallet balance observed when the transaction was settled; a replay returns exactly this value. */
+    balanceAfter: p.decimal('string').fieldName('balance_after').columnType('numeric(18,2)').nullable(),
     wallet: () => p.manyToOne(Wallet).mapToPk().fieldName('wallet_id').nullable().deleteRule('no action'),
     referenceExternalId: p.text().fieldName('reference_external_id').nullable(),
     referenceTransaction: () =>
@@ -69,6 +73,7 @@ export const WagerTransaction = defineEntity({
     },
   ],
   indexes: [
+    { name: 'wager_tx_game_created', properties: ['gameId', 'createdAt'] },
     {
       name: 'wager_tx_pending_reference_due',
       expression:
@@ -100,6 +105,7 @@ export const LedgerEntry = defineEntity({
     transaction: () => p.manyToOne(WagerTransaction).mapToPk().fieldName('transaction_id'),
     direction: p.text(),
     amount: p.decimal('string').columnType('numeric(18,2)'),
+    balanceBefore: p.decimal('string').fieldName('balance_before').columnType('numeric(18,2)'),
     balanceAfter: p.decimal('string').fieldName('balance_after').columnType('numeric(18,2)'),
     createdAt: p.datetime().fieldName('created_at').columnType('timestamptz').defaultRaw('now()'),
   },
@@ -109,6 +115,13 @@ export const LedgerEntry = defineEntity({
     { name: 'ledger_direction_valid', expression: "direction in ('CREDIT','DEBIT')" },
     { name: 'ledger_amount_positive', expression: 'amount > 0' },
     { name: 'ledger_balance_after_non_negative', expression: 'balance_after >= 0' },
+    { name: 'ledger_balance_before_non_negative', expression: 'balance_before >= 0' },
+    {
+      // The entry must be arithmetically consistent: before ± amount = after.
+      name: 'ledger_balance_arithmetic',
+      expression:
+        "(direction = 'CREDIT' and balance_after = balance_before + amount) or (direction = 'DEBIT' and balance_after = balance_before - amount)",
+    },
   ],
   triggers: [
     {

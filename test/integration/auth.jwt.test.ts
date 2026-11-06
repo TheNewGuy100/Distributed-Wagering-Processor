@@ -38,6 +38,10 @@ async function call(app: TestApp, method: string, path: string, token?: string |
     headers: {
       'content-type': 'application/json',
       ...(token ? { authorization: `Bearer ${token}` } : {}),
+      // The Idempotency-Key header is mandatory for wagers; derive the usual default from the body.
+      ...(path === '/wagering/transactions' && (body as any)?.externalTransactionId
+        ? { 'idempotency-key': `${(body as any).providerId}:${(body as any).externalTransactionId}` }
+        : {}),
       ...extra,
     },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -51,19 +55,20 @@ const adminToken = () => idp.sign({ claims: { roles: ['admin'] } });
 
 async function walletFor(app: TestApp = t) {
   const playerId = uid('player');
-  const r = await call(app, 'POST', '/wallets', await adminToken(), { playerId, currency: 'BRL', openingCredit: '100.00' });
+  const r = await call(app, 'POST', '/wallets', await adminToken(), { playerId, initialBalance: { amount: '100.00', currency: 'BRL' } });
   expect(r.status).toBe(201);
-  return { playerId, walletId: r.body!.walletId as string, currency: 'BRL' };
+  return { playerId, walletId: r.body!.id as string, currency: 'BRL' };
 }
 
-const bet = (w: { playerId: string; currency: string }, providerId = 'prov-a', over: Record<string, unknown> = {}) => ({
+const bet = (w: { playerId: string; walletId: string; currency: string }, providerId = 'prov-a', over: Record<string, unknown> = {}) => ({
   providerId,
   externalTransactionId: uid('ext'),
   kind: 'BET',
   playerId: w.playerId,
-  currency: w.currency,
-  amount: '1.00',
+  walletId: w.walletId,
+  money: { amount: '1.00', currency: w.currency },
   roundId: 'r1',
+  gameId: 'fortune-chimp',
   ...over,
 });
 
@@ -83,7 +88,7 @@ describe('authentication: what a bad token looks like', () => {
     const w = await walletFor();
     const r = await call(t, 'GET', `/wallets/${w.walletId}`, await adminToken());
     expect(r.status).toBe(200);
-    expect(r.body!.balance).toBe('100.00');
+    expect(r.body!.balance).toEqual({ amount: '100.00', currency: 'BRL' });
   });
 
   test.each([
@@ -188,7 +193,7 @@ describe('authorization: roles', () => {
     // submit-only caller (a game provider)
     expect(await probe(['wager:submit'], 'POST', '/wagering/transactions', bet(w))).toBe(201);
     expect(await probe(['wager:submit'], 'GET', `/wallets/${w.walletId}`)).toBe(403);
-    expect(await probe(['wager:submit'], 'POST', '/wallets', { playerId: uid('p'), currency: 'BRL' })).toBe(403);
+    expect(await probe(['wager:submit'], 'POST', '/wallets', { playerId: uid('p'), initialBalance: { amount: '0.00', currency: 'BRL' } })).toBe(403);
     expect(await probe(['wager:submit'], 'POST', `/wallets/${w.walletId}/reconciliation`)).toBe(403);
 
     // read-only caller
@@ -198,7 +203,7 @@ describe('authorization: roles', () => {
     expect(await probe(['wager:read'], 'GET', `/providers/prov-a/wagering/transactions/${uid('none')}`)).toBe(404); // allowed, just not found
 
     // wallet admin tasks
-    expect(await probe(['wallet:write'], 'POST', '/wallets', { playerId: uid('p'), currency: 'BRL' })).toBe(201);
+    expect(await probe(['wallet:write'], 'POST', '/wallets', { playerId: uid('p'), initialBalance: { amount: '0.00', currency: 'BRL' } })).toBe(201);
     expect(await probe(['wallet:reconcile'], 'POST', `/wallets/${w.walletId}/reconciliation`)).toBe(200);
 
     // no roles at all: authenticated but allowed nothing
@@ -251,7 +256,7 @@ describe('authorization: provider scoping', () => {
 
     // nothing was booked for the forbidden attempt
     const wallet = await call(t, 'GET', `/wallets/${w.walletId}`, await adminToken());
-    expect(wallet.body!.balance).toBe('99.00'); // 100 - the single allowed 1.00 bet
+    expect(wallet.body!.balance.amount).toBe('99.00'); // 100 - the single allowed 1.00 bet
 
     // reads: own provider ok, another provider's path forbidden
     expect((await call(t, 'GET', `/providers/prov-a/wagering/transactions/${own.externalTransactionId}`, scoped)).status).toBe(200);

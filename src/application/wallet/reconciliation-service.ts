@@ -1,5 +1,7 @@
 import { EntityManager, raw } from '@mikro-orm/postgresql';
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import type { MoneyProps } from '../../domain/events';
+import { Money } from '../../domain/money';
 import { MetricsService } from '../../infrastructure/observability/metrics.service';
 import { Wallet } from '../../infrastructure/persistence/entities';
 import { WalletNotFoundError } from '../errors';
@@ -7,12 +9,13 @@ import { assertUuid } from '../validation';
 
 export interface ReconciliationReport {
   walletId: string;
-  currency: string;
-  storedBalance: string;
-  calculatedBalance: string;
+  storedBalance: MoneyProps;
+  calculatedBalance: MoneyProps;
+  /** Absolute gap between the two; "0.00" when consistent. */
+  difference: MoneyProps;
+  consistent: boolean;
+  checkedEntries: number;
   storedVersion: number;
-  ledgerEntries: number;
-  divergent: boolean;
   /** What exactly disagrees; empty when consistent. */
   differences: string[];
   flaggedAt: string | null;
@@ -95,14 +98,19 @@ export class ReconciliationService {
       flaggedAt = flagged?.flaggedAt ? new Date(flagged.flaggedAt).toISOString() : flaggedAt;
     }
 
+    const stored = Money.parse(r.stored, r.currency);
+    const calculated = Money.parse(r.calculated, r.currency);
+    const diffMinor = stored.minor - calculated.minor;
+    const difference = Money.fromMinor(diffMinor < 0n ? -diffMinor : diffMinor, r.currency); // absolute gap
+
     return {
       walletId,
-      currency: r.currency,
-      storedBalance: r.stored,
-      calculatedBalance: r.calculated,
+      storedBalance: { amount: stored.toString(), currency: r.currency },
+      calculatedBalance: { amount: calculated.toString(), currency: r.currency },
+      difference: { amount: difference.toString(), currency: r.currency },
+      consistent: !divergent,
+      checkedEntries: r.entries,
       storedVersion: Number(r.version),
-      ledgerEntries: r.entries,
-      divergent,
       differences,
       flaggedAt,
       checkedAt: new Date().toISOString(),

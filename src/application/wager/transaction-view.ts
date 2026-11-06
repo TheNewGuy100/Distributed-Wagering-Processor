@@ -1,4 +1,5 @@
 import type { EntityManager } from '@mikro-orm/postgresql';
+import type { MoneyProps } from '../../domain/events';
 import { WagerTransaction, type WagerTransactionEntity } from '../../infrastructure/persistence/entities';
 import { TransactionNotFoundError } from '../errors';
 
@@ -12,10 +13,12 @@ export interface WagerTransactionView {
   status: string;
   playerId: string;
   walletId: string | null;
-  amount: string;
-  currency: string;
+  money: MoneyProps;
+  /** Wallet balance observed when this transaction was settled (what a replay must return). */
+  balance: MoneyProps | null;
   roundId: string | null;
-  referenceExternalId: string | null;
+  gameId: string | null;
+  referenceExternalTransactionId: string | null;
   failureCode: string | null;
   retryCount: number;
   nextRetryAt: string | null;
@@ -33,10 +36,11 @@ export const toView = (r: TransactionRow): WagerTransactionView => ({
   status: r.status,
   playerId: r.playerId,
   walletId: r.wallet ?? null,
-  amount: r.amount,
-  currency: r.currency,
+  money: { amount: r.amount, currency: r.currency },
+  balance: r.balanceAfter == null ? null : { amount: r.balanceAfter, currency: r.currency },
   roundId: r.roundId ?? null,
-  referenceExternalId: r.referenceExternalId ?? null,
+  gameId: r.gameId ?? null,
+  referenceExternalTransactionId: r.referenceExternalId ?? null,
   failureCode: r.failureCode ?? null,
   retryCount: r.retryCount,
   nextRetryAt: iso(r.nextRetryAt),

@@ -55,15 +55,16 @@ describe('structured logs', () => {
     const cid = `test-${randomUUID()}`;
     const res = await fetch(`${t.url}/wagering/transactions`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-correlation-id': cid },
+      headers: { 'content-type': 'application/json', 'x-correlation-id': cid, 'idempotency-key': `prov-obs:${ext}` },
       body: JSON.stringify({
         providerId: 'prov-obs',
         externalTransactionId: ext,
         kind: 'BET',
         playerId: w.playerId,
-        currency: 'BRL',
-        amount: '12.34',
+        walletId: w.walletId,
+        money: { amount: '12.34', currency: 'BRL' },
         roundId: 'r1',
+        gameId: 'fortune-chimp',
       }),
     });
     expect(res.status).toBe(201);
@@ -157,7 +158,7 @@ describe('metrics', () => {
 
   test('pending-reference gauge counts waiting reversals', async () => {
     const w = await createWallet(t, '10.00');
-    await wager(t, w, { kind: 'REFUND', amount: '1.00', referenceExternalId: uid('later') });
+    await wager(t, w, { kind: 'REFUND', amount: '1.00', referenceExternalTransactionId: uid('later') });
     const n = Number(/^pending_reference_transactions (\d+)$/m.exec((await scrape()).text)?.[1]);
     expect(n).toBeGreaterThanOrEqual(1);
   });
@@ -176,14 +177,19 @@ describe('SQS consumer observability', () => {
     try {
       const w = await createWallet(q, '100.00');
       const url = q.app.get(SqsQueues).mainUrl;
+      const ext = uid('ext');
+      const envelope = (data: object) =>
+        JSON.stringify({ messageId: uid('msg'), type: 'WagerTransactionRequested', occurredAt: new Date().toISOString(), data });
       const body = {
         providerId: 'prov-obs',
-        externalTransactionId: uid('ext'),
+        externalTransactionId: ext,
         kind: 'BET',
         playerId: w.playerId,
-        currency: 'BRL',
-        amount: '5.00',
+        walletId: w.walletId,
+        money: { amount: '5.00', currency: 'BRL' },
         roundId: 'r1',
+        gameId: 'fortune-chimp',
+        idempotencyKey: `prov-obs:${ext}`,
       };
       const cid = `sqs-${randomUUID()}`;
       const send = (b: string, attrs = false) =>
@@ -196,8 +202,8 @@ describe('SQS consumer observability', () => {
             ...(attrs ? { MessageAttributes: { correlationId: { DataType: 'String', StringValue: cid } } } : {}),
           }),
         );
-      await send(JSON.stringify(body), true);
-      await send(JSON.stringify(body)); // second SQS message, same business transaction
+      await send(envelope(body), true);
+      await send(envelope(body)); // second SQS message, same business transaction
       await send('{ not json');
 
       const deadline = Date.now() + 20000;

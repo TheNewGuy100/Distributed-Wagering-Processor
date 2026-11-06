@@ -5,8 +5,8 @@ import { LogContext } from '../../infrastructure/observability/log-context';
 import { MetricsService } from '../../infrastructure/observability/metrics.service';
 import { WagerTransaction } from '../../infrastructure/persistence/entities';
 import { insertIgnoringConflict } from '../../infrastructure/persistence/orm-helpers';
-import { lockWalletByPlayer } from '../../infrastructure/persistence/wallet-repository';
-import { ApplicationError, IdempotencyConflictError, WalletNotFoundError } from '../errors';
+import { lockWalletById } from '../../infrastructure/persistence/wallet-repository';
+import { ApplicationError, IdempotencyConflictError, ValidationError, WalletNotFoundError } from '../errors';
 import { PENDING_CONFIG, type PendingConfig } from './pending-reference.config';
 import { settleTransaction } from './settle-transaction';
 import { findTransactionByExternal, toView, type WagerTransactionView } from './transaction-view';
@@ -82,12 +82,14 @@ export class ProcessWagerTransaction {
     // Serializes every balance change of this wallet (other wallets proceed in parallel).
     // Must come before any insert referencing the wallet; see lockWalletByPlayer.
     const lockStart = performance.now();
-    const wallet = await lockWalletByPlayer(tx, cmd.playerId, cmd.currency);
+    const wallet = await lockWalletById(tx, cmd.walletId);
     const waitedMs = performance.now() - lockStart;
     this.metrics.observe('wallet_lock_wait_seconds', waitedMs / 1000);
     if (waitedMs >= this.lockConflictMs) this.metrics.inc('wallet_lock_conflicts_total');
     if (!wallet) throw new WalletNotFoundError();
     LogContext.set({ walletId: wallet.id });
+    // The wallet in the payload must belong to the player in the payload (a currency mismatch is a business rejection).
+    if (wallet.playerId !== cmd.playerId) throw new ValidationError('walletId does not belong to playerId');
 
     const transactionId = randomUUID();
     // Timestamps come from the application clock so the response can be built without reading the row back
@@ -109,6 +111,7 @@ export class ProcessWagerTransaction {
         currency: cmd.currency,
         amount: cmd.amount.toString(),
         roundId: cmd.roundId,
+        gameId: cmd.gameId,
         wallet: wallet.id,
         referenceExternalId: cmd.referenceExternalId,
         createdAt,
@@ -131,6 +134,7 @@ export class ProcessWagerTransaction {
         currency: cmd.currency,
         amount: cmd.amount,
         roundId: cmd.roundId,
+        gameId: cmd.gameId,
         referenceExternalId: cmd.referenceExternalId,
         fromStatus: 'PENDING',
         retryCount: 0,
@@ -148,10 +152,11 @@ export class ProcessWagerTransaction {
         status: outcome.status,
         playerId: cmd.playerId,
         walletId: wallet.id,
-        amount: cmd.amount.toString(),
-        currency: cmd.currency,
+        money: { amount: cmd.amount.toString(), currency: cmd.currency },
+        balance: { amount: outcome.balance.toString(), currency: wallet.currency },
         roundId: cmd.roundId,
-        referenceExternalId: cmd.referenceExternalId,
+        gameId: cmd.gameId,
+        referenceExternalTransactionId: cmd.referenceExternalId,
         failureCode: outcome.failureCode,
         retryCount: outcome.retryCount,
         nextRetryAt: outcome.nextRetryAt ? outcome.nextRetryAt.toISOString() : null,

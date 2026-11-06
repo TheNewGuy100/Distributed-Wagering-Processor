@@ -13,13 +13,12 @@ import {
 import { insertIgnoringConflict } from '../../infrastructure/persistence/orm-helpers';
 import { persistWalletChanges } from '../../infrastructure/persistence/wallet-repository';
 import { ValidationError, WalletAlreadyExistsError, WalletNotFoundError } from '../errors';
-import { asObject, assertUuid, currencyField, moneyField, requiredString } from '../validation';
+import { asObject, assertUuid, moneyProps, requiredString } from '../validation';
 
 export interface WalletView {
-  walletId: string;
+  id: string;
   playerId: string;
-  currency: string;
-  balance: string;
+  balance: { amount: string; currency: string };
   version: number;
   createdAt: string;
   /** Set when a reconciliation found a divergence; informational, never auto-cleared. */
@@ -30,8 +29,9 @@ export interface LedgerEntryView {
   entryId: string;
   transactionId: string;
   direction: string;
-  amount: string;
-  balanceAfter: string;
+  money: { amount: string; currency: string };
+  balanceBefore: { amount: string; currency: string };
+  balanceAfter: { amount: string; currency: string };
   createdAt: string;
 }
 
@@ -41,10 +41,9 @@ export interface LedgerPage {
 }
 
 const toView = (w: WalletEntity): WalletView => ({
-  walletId: w.id,
+  id: w.id,
   playerId: w.playerId,
-  currency: w.currency,
-  balance: w.balance,
+  balance: { amount: w.balance, currency: w.currency },
   version: Number(w.version),
   createdAt: new Date(w.createdAt).toISOString(),
   flaggedAt: w.flaggedAt ? new Date(w.flaggedAt).toISOString() : null,
@@ -70,11 +69,9 @@ export class WalletService {
   async create(body: unknown): Promise<WalletView> {
     const o = asObject(body);
     const playerId = requiredString(o, 'playerId');
-    const currency = currencyField(o);
-    const opening =
-      o.openingCredit === undefined || o.openingCredit === null
-        ? null
-        : moneyField(o.openingCredit, currency, 'openingCredit');
+    const initial = moneyProps(o.initialBalance, 'initialBalance');
+    const currency = initial.currency;
+    const opening = initial;
 
     return this.em.fork().transactional(async (tx) => {
       const walletId = randomUUID();
@@ -115,8 +112,9 @@ export class WalletService {
             externalTransactionId: externalId,
             kind: 'OPENING',
             walletId,
-            amount: opening.toString(),
-            currency,
+            roundId: null,
+            gameId: null,
+            money: { amount: opening.toString(), currency },
           }),
         );
         await enqueueEvent(
@@ -125,9 +123,9 @@ export class WalletService {
             walletId,
             transactionId: txId,
             direction: 'CREDIT',
-            amount: opening.toString(),
-            balanceAfter: entry.balanceAfter.toString(),
-            currency,
+            money: { amount: opening.toString(), currency },
+            balanceBefore: { amount: entry.balanceBefore.toString(), currency },
+            balanceAfter: { amount: entry.balanceAfter.toString(), currency },
             walletVersion: wallet.version,
           }),
         );
@@ -150,7 +148,8 @@ export class WalletService {
     }
     const after = cursor === undefined ? '0' : decodeCursor(cursor);
     const em = this.em.fork();
-    await this.load(em, walletId); // 404 when the wallet does not exist
+    const { balance } = await this.load(em, walletId); // 404 when the wallet does not exist
+    const currency = balance.currency;
 
     // Ordered by the insert-order sequence, so pages are stable even while new entries are appended.
     const rows = await em.find(
@@ -164,8 +163,9 @@ export class WalletService {
         entryId: r.id,
         transactionId: r.transaction,
         direction: r.direction,
-        amount: r.amount,
-        balanceAfter: r.balanceAfter,
+        money: { amount: r.amount, currency },
+        balanceBefore: { amount: r.balanceBefore, currency },
+        balanceAfter: { amount: r.balanceAfter, currency },
         createdAt: new Date(r.createdAt).toISOString(),
       })),
       nextCursor: rows.length > limit ? encodeCursor(page[page.length - 1]!.seq) : null,
