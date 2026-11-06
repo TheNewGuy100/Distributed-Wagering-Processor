@@ -47,6 +47,8 @@ export const WagerTransaction = defineEntity({
     roundId: p.text().fieldName('round_id').nullable(),
     /** Which game the round belongs to; there is no games registry, so this is the only handle for per-game reports. */
     gameId: p.text().fieldName('game_id').nullable(),
+    /** Correlation id of the request/message that created it, so work done later (retries) stays on the same trace. */
+    correlationId: p.text().fieldName('correlation_id').nullable(),
     /** Wallet balance observed when the transaction was settled; a replay returns exactly this value. */
     balanceAfter: p.decimal('string').fieldName('balance_after').columnType('numeric(18,2)').nullable(),
     wallet: () => p.manyToOne(Wallet).mapToPk().fieldName('wallet_id').nullable().deleteRule('no action'),

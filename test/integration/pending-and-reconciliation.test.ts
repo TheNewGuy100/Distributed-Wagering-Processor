@@ -50,7 +50,13 @@ describe('pending reference worker', () => {
   test('a reversal that arrived first is applied once its reference shows up', async () => {
     const w = await createWallet(t, '50.00');
     const betExt = uid('bet');
-    const refund = await wager(t, w, { kind: 'REFUND', amount: '10.00', referenceExternalTransactionId: betExt });
+    const corr = uid('corr');
+    const refund = await wager(
+      t,
+      w,
+      { kind: 'REFUND', amount: '10.00', referenceExternalTransactionId: betExt },
+      { 'x-correlation-id': corr },
+    );
     expect(refund.status).toBe(202);
 
     const worker = await bootApp(fast);
@@ -70,6 +76,13 @@ describe('pending reference worker', () => {
       // the reversal had no gameId of its own: it inherits the game of the bet it reverses (per-game reports)
       const view = await api(t, 'GET', `/wagering/transactions/${refund.body.transactionId}`);
       expect(view.body.gameId).toBe(game);
+      // the retry ran in another process, much later, yet its events stay on the trace of the original request
+      const events = await t.orm.em.fork().execute<{ event_type: string; cid: string }[]>(
+        "select event_type, payload->>'correlationId' as cid from outbox_events where aggregate_id = ?",
+        [refund.body.transactionId],
+      );
+      expect(events.map((e) => e.event_type)).toContain('WagerTransactionProcessed');
+      for (const e of events) expect(e.cid).toBe(corr);
     } finally {
       await worker.close();
     }

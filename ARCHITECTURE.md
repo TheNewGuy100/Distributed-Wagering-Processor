@@ -378,6 +378,15 @@ name in the catalog **and** by behaviour, every migration reversible, no entity/
 
 * **Per-wallet throughput is bounded by the row lock.** Correctness over speed for one wallet; scaling comes from
   many wallets in parallel (load test: hot wallets show up as lock conflicts, not errors).
+* **Throughput of one wallet is bounded by its lock, by design.** Every balance change of a wallet is serialized (that
+  is what makes a negative balance and a lost update impossible), so a single wallet cannot go faster than one
+  transaction's lock hold time. Measured locally (Windows, Docker, 2 instances, 64 concurrent requests, 10 s): **all
+  traffic on ONE wallet: ~130 req/s, p50 ~430 ms, p99 ~930 ms, 0 errors, 0 divergences**, against ~360 req/s when the
+  same load is spread over 50 wallets (20 % of it on two hot ones). Latency under contention is queueing time, not slow
+  work. A player produces a few operations per second, so this is well above any real player; it matters for shared
+  wallets (a jackpot or house wallet), which should be split into several sub-wallets by the caller. The honest way to
+  go faster inside one wallet would be to batch several requests per lock acquisition; not done, for the complexity it
+  would add to the idempotency and ordering guarantees.
 * **Outbox throughput under sustained load**: the GitHub Actions load test (358 req/s) produced events faster than the
   publishers sent them: lag peaked at 14 s and the backlog took 28.5 s to drain. Events of one wallet are published in
   order, so hot wallets are the slowest to drain. More publisher instances help across wallets, not within one.
@@ -393,6 +402,16 @@ name in the catalog **and** by behaviour, every migration reversible, no entity/
   wait-time heuristic (≥ `LOCK_CONFLICT_THRESHOLD_MS`), not a PostgreSQL lock counter.
 * **MiniStack is an emulator**: FIFO and DLQ semantics are verified by the contract test, but real AWS SQS (limits,
   throttling, the exact 5-minute deduplication window) was not exercised.
+* **Wallet that does not belong to the player.** A message whose `walletId` exists but belongs to another player is
+  a permanent error (`ValidationError`): it goes straight to the DLQ. A `walletId` that does not exist yet is retried
+  with backoff (the wallet may be created a moment later) and, once the retries run out, recorded as `FAILED` and
+  dead-lettered. Over HTTP the first is a 400 and the second a 404.
+* **Trace of delayed work.** A transaction keeps the correlation id of the request or message that created it
+  (`wager_transactions.correlation_id`), so a pending-reference retry that runs minutes later, in another process,
+  emits its events with that same `correlationId`.
+* **Zitadel is covered with tokens shaped like Zitadel's, not a real Zitadel.** The claim mapping (project roles) is
+  unit-tested with such tokens; the full flow was exercised against a real Keycloak only (compose + CI). A Zitadel
+  instance was not run.
 * **Reference lookup is scoped to the same provider** (a reversal can only reference its own provider's transaction).
 * **No rate limiting or request size policy** beyond Nest defaults; no authentication until the extension point is used.
 * **Transient errors on the HTTP path return `503` and persist nothing**, so the caller retries with the same key; a

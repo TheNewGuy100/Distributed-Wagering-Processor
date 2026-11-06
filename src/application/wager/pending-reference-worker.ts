@@ -66,13 +66,13 @@ export class PendingReferenceWorker implements OnApplicationBootstrap, BeforeApp
     const due = await this.em.fork().find(
       WagerTransaction,
       { status: 'PENDING_REFERENCE', nextRetryAt: { $lte: raw('now()') as never } },
-      { fields: ['id', 'wallet'], orderBy: { nextRetryAt: 'asc' }, limit: this.config.batchSize },
+      { fields: ['id', 'wallet', 'correlationId'], orderBy: { nextRetryAt: 'asc' }, limit: this.config.batchSize },
     );
     let handled = 0;
     for (const d of due) {
       if (this.stopping) break;
       try {
-        if (d.wallet && (await this.retryOne(d.id, d.wallet))) handled++;
+        if (d.wallet && (await this.retryOne(d.id, d.wallet, d.correlationId ?? null))) handled++;
       } catch (e) {
         this.logger.warn(`retry of ${d.id} failed, will be picked up again: ${(e as Error).message}`);
       }
@@ -80,8 +80,9 @@ export class PendingReferenceWorker implements OnApplicationBootstrap, BeforeApp
     return handled;
   }
 
-  private retryOne(transactionId: string, walletId: string): Promise<boolean> {
-    return LogContext.run({ transactionId, walletId, correlationId: `pending:${transactionId}` }, () =>
+  private retryOne(transactionId: string, walletId: string, correlationId: string | null): Promise<boolean> {
+    // Keep the trace of the request that created the transaction, so its retries and their events share its correlation id.
+    return LogContext.run({ transactionId, walletId, correlationId: correlationId ?? `pending:${transactionId}` }, () =>
       this.retryOneInContext(transactionId, walletId),
     );
   }
