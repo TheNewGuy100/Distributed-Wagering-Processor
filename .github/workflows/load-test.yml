@@ -1,0 +1,46 @@
+name: Load test
+
+# Manual on purpose: it is slow and its numbers depend on the runner.
+on:
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: Test duration in seconds
+        default: '30'
+      concurrency:
+        description: Concurrent requests
+        default: '64'
+      wallets:
+        description: Number of wallets
+        default: '50'
+      instances:
+        description: Application instances (in one process)
+        default: '2'
+
+jobs:
+  load:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: cp .env.example .env
+      - run: docker compose up -d --wait
+      - run: bun run migration:up
+      - name: Run load test
+        env:
+          LOAD_DURATION_SECONDS: ${{ inputs.duration_seconds }}
+          LOAD_CONCURRENCY: ${{ inputs.concurrency }}
+          LOAD_WALLETS: ${{ inputs.wallets }}
+          LOAD_INSTANCES: ${{ inputs.instances }}
+        run: bun run test:load
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: load-test-report
+          path: load-test-report.json
+      - if: always()
+        run: docker compose down -v
