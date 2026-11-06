@@ -128,11 +128,11 @@ wrong. The report (also in `load-test-report.json`) lists environment, methodolo
 rate, wallet lock conflicts and outbox lag. In GitHub Actions it is the manual **Load test** workflow.
 
 Reference runs on a developer machine (Ryzen 7 5700X, 16 threads, PostgreSQL 17 in Docker on Windows, Bun 1.4.4,
-2 instances, 10 s, concurrency 64, fresh database each run): **~320–390 req/s, p50 145–190 ms, p95 330–420 ms,
-p99 470–610 ms, 0 % errors**, ~400–860 lock conflicts, 0 diverging wallets, outbox drained in seconds. Run-to-run
-variance on this setup is large (the slowest run was about a third of the fastest). The load generator, both instances
-and the databases share the machine, so read it as relative, not as capacity. An A/B against the earlier raw-SQL version
-of the hot path is in ARCHITECTURE.md (limitations).
+2 instances, 10 s, concurrency 64, fresh database each run): **~310–470 req/s, p50 135–195 ms, p95 260–380 ms,
+p99 400–540 ms, 0 % errors**, 0 diverging wallets, outbox drained in seconds. Run-to-run variance on this setup is
+large (the same code varied by about 50% between runs). The load generator, both instances and the databases share the
+machine, so read it as relative, not as capacity. The A/B history (raw SQL vs ORM vs optimized ORM) is in
+ARCHITECTURE.md (limitations).
 
 ## License
 

@@ -1,4 +1,4 @@
-import { raw, type EntityManager } from '@mikro-orm/postgresql';
+import type { EntityManager } from '@mikro-orm/postgresql';
 import { FailureCode } from '../../domain/errors';
 import {
   WagerTransactionPendingReference,
@@ -22,7 +22,7 @@ import {
   planPendingReferenceRetry,
   type PendingReferencePolicy,
 } from '../../domain/wager-transaction';
-import { enqueueEvent } from '../../infrastructure/outbox/outbox-writer';
+import { enqueueEvents } from '../../infrastructure/outbox/outbox-writer';
 import { WagerTransaction } from '../../infrastructure/persistence/entities';
 import { persistWalletChanges } from '../../infrastructure/persistence/wallet-repository';
 import { findTransactionByExternal } from './transaction-view';
@@ -46,6 +46,10 @@ export interface SettleInput {
 export interface SettleOutcome {
   status: TransactionStatus;
   failureCode: string | null;
+  /** Final values of the row, so callers can build the response without reading it back. */
+  retryCount: number;
+  nextRetryAt: Date | null;
+  updatedAt: Date;
 }
 
 export async function loadReference(
@@ -86,6 +90,7 @@ export async function settleTransaction(
   policy: PendingReferencePolicy,
 ): Promise<SettleOutcome> {
   const versionBefore = wallet.version;
+  const updatedAt = new Date();
   const reference =
     s.referenceExternalId === null ? null : await loadReference(tx, s.providerId, s.referenceExternalId);
 
@@ -120,16 +125,21 @@ export async function settleTransaction(
     await tx.nativeUpdate(
       WagerTransaction,
       { id: s.transactionId },
-      { status: 'PENDING_REFERENCE', retryCount: retry.retryCount, nextRetryAt: retry.at, updatedAt: raw('now()') as never },
+      { status: 'PENDING_REFERENCE', retryCount: retry.retryCount, nextRetryAt: retry.at, updatedAt },
     );
     // Announce the wait once; later reschedules are internal bookkeeping.
     if (s.fromStatus === 'PENDING') {
-      await enqueueEvent(
-        tx,
+      await enqueueEvents(tx, [
         new WagerTransactionPendingReference(s.transactionId, { ...base, referenceExternalId: s.referenceExternalId }),
-      );
+      ]);
     }
-    return { status: 'PENDING_REFERENCE', failureCode: null };
+    return {
+      status: 'PENDING_REFERENCE',
+      failureCode: null,
+      retryCount: retry.retryCount,
+      nextRetryAt: retry.at,
+      updatedAt,
+    };
   }
 
   const entry = applyDecision(wallet, s.transactionId, decision);
@@ -148,7 +158,7 @@ export async function settleTransaction(
       failureCode,
       nextRetryAt: null,
       referenceTransaction: processed ? (reference?.id ?? null) : null,
-      updatedAt: raw('now()') as never,
+      updatedAt,
     },
   );
 
@@ -171,7 +181,7 @@ export async function settleTransaction(
   } else {
     events.push(new WagerTransactionRejected(s.transactionId, { ...base, failureCode: failureCode! }));
   }
-  for (const ev of events) await enqueueEvent(tx, ev);
+  await enqueueEvents(tx, events);
 
-  return { status, failureCode };
+  return { status, failureCode, retryCount: s.retryCount, nextRetryAt: null, updatedAt };
 }

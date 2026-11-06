@@ -225,12 +225,19 @@ name in the catalog **and** by behaviour, every migration reversible, no entity/
 
 ## 12. Known limitations and trade-offs
 
-* **The ORM costs throughput.** Same 10 statements per bet as the earlier hand-written SQL, so the cost is CPU in the ORM
-  layer (query building, hydration), not round trips. A/B on one developer machine (fresh databases, alternating order,
-  10 s, 64 concurrent, 2 instances in one process): calm runs gave ~530–700 req/s with raw SQL against ~330–390 req/s with
-  the ORM (p50 85–105 ms vs 145–170 ms), i.e. roughly 40% lower; noisy runs overlapped. Correctness tests are identical
-  in both. If throughput mattered more than the type safety and schema ownership, the hot path could go back to
-  `em.execute` without touching the rest.
+* **The ORM costs throughput, partly recovered.** The first ORM version sent the same 10 statements per bet as the
+  hand-written SQL, so its cost was CPU in the ORM layer (query building, hydration), not round trips. Measured on one
+  developer machine (fresh databases, alternating order, 10 s, 64 concurrent, 2 instances in one process): calm runs gave
+  ~530–700 req/s with raw SQL against ~330–390 req/s with the ORM (p50 85–105 ms vs 145–170 ms), about 40% lower.
+  Two changes then cut a bet to **8 statements** (both outbox events in one multi-row insert; the response built from
+  values already in memory instead of re-reading the row; pinned by `lock-order.test.ts`). Paired A/B of that change
+  against the first ORM version: faster in 4 of 4 rounds, by 1.16×–1.99× (median about 1.4×; ~310–470 req/s, p50
+  135–195 ms). The machine is noisy, so treat the size as indicative; the raw-SQL comparison was not repeated after the
+  optimization. If throughput mattered more than the type safety and schema ownership, the hot path could still go back
+  to `em.execute` without touching the rest.
+* **`wager_transactions.created_at`/`updated_at` use the application clock** (set explicitly, so the response needs no
+  read-back); the column defaults still use the database clock for rows written elsewhere. They are informational:
+  ordering relies on the outbox `seq`, due-time on `next_retry_at`.
 
 * **Per-wallet throughput is bounded by the row lock.** Correctness over speed for one wallet; scaling comes from
   many wallets in parallel (load test: hot wallets show up as lock conflicts, not errors).

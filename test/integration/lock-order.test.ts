@@ -76,6 +76,16 @@ describe('wallet lock ordering (as sent to PostgreSQL)', () => {
     });
   }
 
+  test('round trips stay minimal: a BET takes 8 statements, both outbox events in one insert', async () => {
+    const w = await createWallet(t, '100.00');
+    const orm = t.app.get(MikroORM);
+    const sql = await captureSql(orm, () => wager(t, w, { amount: '1.00' }));
+    // begin, lock, claim, wallet update, ledger, transaction update, outbox (multi-row), commit
+    expect(sql).toHaveLength(8);
+    expect(sql.filter((s) => /insert into "outbox_events"/.test(s))).toHaveLength(1);
+    expect(sql.filter((s) => /select .*from "wager_transactions"/.test(s))).toHaveLength(0); // no read-back
+  });
+
   test('an idempotent replay also takes the lock first', async () => {
     const w = await createWallet(t, '100.00');
     const ext = uid('ext');

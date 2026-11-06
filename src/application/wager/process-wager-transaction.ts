@@ -9,12 +9,7 @@ import { lockWalletByPlayer } from '../../infrastructure/persistence/wallet-repo
 import { ApplicationError, IdempotencyConflictError, WalletNotFoundError } from '../errors';
 import { PENDING_CONFIG, type PendingConfig } from './pending-reference.config';
 import { settleTransaction } from './settle-transaction';
-import {
-  findTransactionByExternal,
-  findTransactionById,
-  toView,
-  type WagerTransactionView,
-} from './transaction-view';
+import { findTransactionByExternal, toView, type WagerTransactionView } from './transaction-view';
 import type { ProcessWagerCommand } from './wager-command';
 
 export interface ProcessResult {
@@ -95,6 +90,9 @@ export class ProcessWagerTransaction {
     LogContext.set({ walletId: wallet.id });
 
     const transactionId = randomUUID();
+    // Timestamps come from the application clock so the response can be built without reading the row back
+    // (they are informational; ordering and retry scheduling never depend on created_at/updated_at).
+    const createdAt = new Date();
     // The unique constraints (idempotency key, provider + external id) are the arbiter: a duplicate inserts nothing.
     const claimed = await insertIgnoringConflict(
       tx,
@@ -113,13 +111,15 @@ export class ProcessWagerTransaction {
         roundId: cmd.roundId,
         wallet: wallet.id,
         referenceExternalId: cmd.referenceExternalId,
+        createdAt,
+        updatedAt: createdAt,
       },
       'id',
     );
     if (!claimed) return this.replay(tx, cmd);
     LogContext.set({ transactionId });
 
-    await settleTransaction(
+    const outcome = await settleTransaction(
       tx,
       wallet,
       {
@@ -138,8 +138,28 @@ export class ProcessWagerTransaction {
       this.pending.policy,
     );
 
-    const row = await findTransactionById(tx, transactionId);
-    return { transaction: toView(row!), idempotentReplay: false };
+    // Everything in the response is already known: no read-back round trip.
+    return {
+      transaction: {
+        transactionId,
+        providerId: cmd.providerId,
+        externalTransactionId: cmd.externalTransactionId,
+        kind: cmd.kind,
+        status: outcome.status,
+        playerId: cmd.playerId,
+        walletId: wallet.id,
+        amount: cmd.amount.toString(),
+        currency: cmd.currency,
+        roundId: cmd.roundId,
+        referenceExternalId: cmd.referenceExternalId,
+        failureCode: outcome.failureCode,
+        retryCount: outcome.retryCount,
+        nextRetryAt: outcome.nextRetryAt ? outcome.nextRetryAt.toISOString() : null,
+        createdAt: createdAt.toISOString(),
+        updatedAt: outcome.updatedAt.toISOString(),
+      },
+      idempotentReplay: false,
+    };
   }
 
   private async replay(tx: EntityManager, cmd: ProcessWagerCommand): Promise<ProcessResult> {
