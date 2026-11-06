@@ -13,3 +13,4 @@ dist
 *.log
 Dockerfile
 docker-compose.yml
+docker

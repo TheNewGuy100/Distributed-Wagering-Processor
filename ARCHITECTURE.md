@@ -35,18 +35,37 @@ One NestJS process runs everything; each part can be switched off per instance (
 
 ### Packaging and deployment shape
 
-`docker compose up --build` runs the whole system: `postgres` and `ministack` (healthchecked), a one-shot `migrate`
-service (same image, `bun scripts/migrate.ts up`) and `app`, which starts only after `migrate` completed successfully
-and both dependencies are healthy. The image is a two-stage `oven/bun` build (production dependencies only, installed
-from the lockfile; the TypeScript sources run directly, `tsconfig.json` ships because Bun reads the decorator settings
-from it), runs as the unprivileged `bun` user, uses exec-form `CMD` so Bun is PID 1 and receives `SIGTERM`, and has a
-readiness healthcheck plus a 30 s `stop_grace_period`. Running migrations as a separate, single step avoids N replicas
-racing to migrate at start-up (concurrent migrators were not tested here, so the design does not rely on them being safe).
+`docker compose up --build` runs the whole system, eight services, every one with a healthcheck:
 
-CI builds this image and tests the stack through the container (readiness, a wallet, a bet, an idempotent replay,
-reconciliation, `/metrics`, and a prompt graceful stop). The integration tests deliberately do **not** run against the
-`app` container: they boot their own instances, and a second consumer or outbox publisher on the same database would race
-them, so the test helpers refuse to run when something answers on port 3000.
+| Service | Role |
+|---|---|
+| `postgres`, `ministack` | PostgreSQL and the SQS emulator |
+| `migrate` | one-shot: applies the migrations (same image, `bun scripts/migrate.ts up`), then exits |
+| `app` | the API, console, SQS consumer, outbox publisher and pending-reference worker; starts only after `migrate` succeeded and both dependencies are healthy |
+| `events-consumer` | a downstream system stand-in (`tools/events-consumer`): consumes `wager-events.fifo`, **deduplicates by `eventId`** (delivery is at-least-once), checks per-wallet `walletVersion` order, serves a page; poison messages are recorded and acknowledged, never looped |
+| `keycloak` | the identity provider with an imported demo realm |
+| `prometheus`, `grafana` | scrape `/metrics` every 5 s; Grafana opens on a provisioned 18-panel dashboard (no login to look) |
+
+The image is a two-stage `oven/bun` build (production dependencies only, installed from the lockfile; the TypeScript
+sources run directly, `tsconfig.json` ships because Bun reads the decorator settings from it), runs as the unprivileged
+`bun` user, uses exec-form `CMD` so Bun is PID 1 and receives `SIGTERM`, and has a readiness healthcheck plus a 30 s
+`stop_grace_period`; `events-consumer` reuses the same image. Running migrations as a separate, single step avoids N
+replicas racing to migrate at start-up (concurrent migrators were not tested here, so the design does not rely on them
+being safe).
+
+**`app` does not depend on `keycloak`.** With `AUTH_MODE=none` (the default) the API must not wait for, or be blocked by, a
+system it does not use; with `AUTH_MODE=jwt` it discovers the identity provider lazily and answers 503 until it is up.
+Authentication is switched with one variable on the same stack (`AUTH_MODE=jwt docker compose up -d app`).
+
+The dashboard is checked, not just shipped: `docker/grafana/check-queries.mjs` runs every panel query against Prometheus and
+verifies that every metric a query names exists in the source, so a renamed metric cannot silently turn a panel into a flat
+zero (the sparse counters use `or vector(0)`, which would otherwise hide exactly that). It was mutation-checked with a typo.
+
+CI runs the whole stack in one job (`full-stack`) and checks each system: readiness and a smoke test through the container,
+events arriving at the downstream consumer, Prometheus scraping, the provisioned dashboard and its queries, authentication
+switched on with real Keycloak tokens, and a prompt graceful stop of `app` and `events-consumer`. The integration tests
+deliberately do **not** run against the `app` container: they boot their own instances, and a second consumer or outbox
+publisher on the same database would race them, so the test helpers refuse to run when something answers on port 3000.
 
 ### The browser test console (`/ui`)
 
@@ -277,9 +296,9 @@ A global `AuthGuard` calls an `Authenticator` port and attaches a `Principal` (`
 
 ### Verified against a real identity provider
 
-`docker-compose.auth.yml` adds Keycloak with an imported demo realm (two providers, `acme` and `globex`, and an operations
-client, all client-credentials). `docker/keycloak/smoke.sh` requests real tokens and checks authentication, roles and
-scoping through the container; CI runs it. The integration tests use an in-process fake IdP (OIDC discovery + JWKS with
+The compose stack includes Keycloak with an imported demo realm (two providers, `acme` and `globex`, and an operations
+client, all client-credentials); `AUTH_MODE=jwt docker compose up -d app` turns the API's authentication on against it.
+`docker/keycloak/smoke.sh` requests real tokens and checks authentication, roles and scoping through the container; CI runs it. The integration tests use an in-process fake IdP (OIDC discovery + JWKS with
 generated keys) so they can also exercise rotation, an IdP outage and forged tokens deterministically.
 
 Limits: only machine-to-machine bearer tokens are exercised (client credentials); there is no login UI, refresh or token

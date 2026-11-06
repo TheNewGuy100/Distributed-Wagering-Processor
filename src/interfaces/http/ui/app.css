@@ -16,6 +16,8 @@ h2 { font-size: 1.02rem; margin: 0 0 .75rem; display: flex; gap: .5rem; align-it
 code, .mono { font-family: var(--mono); font-size: .86em; }
 .muted { color: var(--muted); } .small { font-size: .82rem; }
 .top { display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; padding: 1rem 16px .25rem; max-width: 1200px; margin: 0 auto; }
+.links { display: flex; gap: .3rem .9rem; flex-wrap: wrap; align-items: baseline; margin-top: .3rem; }
+.links a { color: var(--accent); }
 .conn { display: flex; gap: .4rem; flex-wrap: wrap; align-items: flex-start; }
 .chip { border: 1px solid var(--line); background: var(--card); border-radius: 999px; padding: .15rem .6rem; font-size: .8rem; }
 .chip b { margin-left: .25rem; } .chip.up b { color: var(--ok); } .chip.down b { color: var(--err); }

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Events consumer · Wagering Processor</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header>
+    <h1>Events consumer <span class="muted">what the outbox publishes</span></h1>
+    <p class="muted small">A stand-in for a downstream system reading <code>wager-events.fifo</code>. It acknowledges each message after
+      recording it, <b>drops repeated event ids</b> (delivery is at-least-once) and checks that each wallet's versions arrive in order.
+      Make traffic in the <a href="http://localhost:3000/ui" rel="noopener">test console</a> and watch it appear here.</p>
+  </header>
+
+  <section class="tiles" id="tiles" aria-live="polite"></section>
+
+  <section class="card">
+    <h2>Events <span class="muted small">newest first · click a row for the full envelope</span>
+      <label class="inline small"><input type="checkbox" id="live" checked> live</label>
+      <button id="clear" type="button" class="ghost small">Clear view</button></h2>
+    <div id="list" class="list"></div>
+  </section>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

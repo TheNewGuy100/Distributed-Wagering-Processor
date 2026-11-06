@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# End-to-end check of the API behind a REAL Keycloak (the docker-compose.auth.yml overlay).
+# End-to-end check of the API behind a REAL Keycloak (part of the docker compose stack).
 #
-#   docker compose -f docker-compose.yml -f docker-compose.auth.yml up -d --build --wait
+#   AUTH_MODE=jwt docker compose up -d --build --wait
 #   bash docker/keycloak/smoke.sh
 #
 # Exits non-zero on the first unexpected status. Safe to run repeatedly (every run uses fresh ids).

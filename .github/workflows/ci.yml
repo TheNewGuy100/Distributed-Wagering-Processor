@@ -50,19 +50,22 @@ jobs:
         if: always()
         run: docker compose down -v
 
-  docker-stack:
-    name: Docker image + whole stack (compose up)
+  full-stack:
+    name: Whole system with docker compose (API, events, Keycloak, Prometheus, Grafana)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - name: Build the image and start postgres, ministack, migrate and app
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build the image and start every service
         run: docker compose up -d --build --wait
       - name: Migrations ran once and the app is ready
         run: |
           test "$(docker inspect -f '{{.State.ExitCode}}' $(docker compose ps -aq migrate))" = 0
           curl -fsS http://localhost:3000/health/ready
-      - name: Smoke test through the container (wallet, bet, idempotent replay, balance, reconciliation)
+      - name: Smoke test through the container (wallet, bet, idempotent replay, balance, reconciliation, console)
         run: |
           set -euo pipefail
           api=http://localhost:3000
@@ -81,37 +84,54 @@ jobs:
           curl -fsS -o /dev/null $api/ui
           curl -fsS -o /dev/null $api/ui/app.js
           curl -fsSI $api/ui | grep -qi "^content-security-policy: default-src 'none'"
+      - name: Events reach the downstream consumer (outbox, then SQS, then deduplicating consumer)
+        run: |
+          for i in $(seq 1 30); do
+            stats=$(curl -fsS http://localhost:3100/api/events || true)
+            if echo "$stats" | grep -q '"WalletBalanceChanged"'; then break; fi
+            sleep 2
+          done
+          echo "$stats" | grep -q '"WalletBalanceChanged"'
+          echo "$stats" | grep -q '"invalid":0'
+          echo "$stats" | grep -q '"outOfOrder":0'
+          curl -fsS -o /dev/null http://localhost:3100/
+      - name: Prometheus scrapes the API and Grafana has the provisioned dashboard
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:9090/api/v1/targets | grep -q '"health":"up"'; then break; fi
+            sleep 2
+          done
+          curl -fsS http://localhost:9090/api/v1/targets | grep -q '"health":"up"'
+          curl -fsS -u admin:admin http://localhost:3001/api/datasources | grep -q '"type":"prometheus"'
+          curl -fsS -u admin:admin http://localhost:3001/api/dashboards/uid/wagering | grep -q '"title":"Wagering Processor"'
+          curl -fsS http://localhost:3001/api/dashboards/uid/wagering | grep -q '"title":"Wagering Processor"' # no login needed to look
+      - name: Every dashboard query is valid and its metrics exist (retried because rate() needs two scrapes)
+        run: |
+          for i in $(seq 1 12); do
+            if node docker/grafana/check-queries.mjs; then exit 0; fi
+            sleep 5
+          done
+          node docker/grafana/check-queries.mjs
+      - name: Turn authentication on (same stack, AUTH_MODE=jwt) and test with real Keycloak tokens
+        run: |
+          AUTH_MODE=jwt docker compose up -d --wait app
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/wallets/00000000-0000-0000-0000-000000000000)" = 401
+          bash docker/keycloak/smoke.sh
       - name: Stop is graceful and prompt (SIGTERM as PID 1; a leaked shutdown timer once made this take 20 s)
         run: |
           start=$(date +%s)
-          docker compose stop app
+          docker compose stop app events-consumer
           elapsed=$(( $(date +%s) - start ))
-          code=$(docker inspect -f '{{.State.ExitCode}}' $(docker compose ps -aq app))
-          echo "exit code $code after ${elapsed}s"
-          test "$code" = 0
-          test "$elapsed" -le 10
+          for svc in app events-consumer; do
+            code=$(docker inspect -f '{{.State.ExitCode}}' $(docker compose ps -aq $svc))
+            echo "$svc exit code $code"
+            test "$code" = 0
+          done
+          echo "both stopped in ${elapsed}s"
+          test "$elapsed" -le 15
       - name: Service logs on failure
         if: failure()
         run: docker compose logs --no-color
       - name: Stop services
         if: always()
         run: docker compose down -v
-
-  docker-stack-keycloak:
-    name: Real identity provider (Keycloak) in front of the API
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      COMPOSE_FILES: -f docker-compose.yml -f docker-compose.auth.yml
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build the image and start the stack with Keycloak
-        run: docker compose $COMPOSE_FILES up -d --build --wait
-      - name: Tokens issued by Keycloak are validated; roles and provider scoping are enforced
-        run: bash docker/keycloak/smoke.sh
-      - name: Service logs on failure
-        if: failure()
-        run: docker compose $COMPOSE_FILES logs --no-color
-      - name: Stop services
-        if: always()
-        run: docker compose $COMPOSE_FILES down -v

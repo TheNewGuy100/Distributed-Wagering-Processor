@@ -1,5 +1,20 @@
-# Whole stack:   docker compose up --build        (API on http://localhost:3000)
-# Only the infra: docker compose up -d --wait postgres ministack   (what the tests and `bun run start` use)
+# The whole system, one command:
+#
+#   docker compose up --build            (or: bun run stack:up)
+#
+#   API + test console   http://localhost:3000        (/ui)
+#   Events consumer      http://localhost:3100        what the outbox publishes
+#   Grafana              http://localhost:3001        dashboard "Wagering Processor" (no login; admin/admin to edit)
+#   Prometheus           http://localhost:9090
+#   Keycloak             http://localhost:8081        admin/admin; demo realm "wagering"
+#
+# Authentication is OFF by default so the API and the console work without a token. Turn it on (Keycloak is already up):
+#
+#   AUTH_MODE=jwt docker compose up -d app            then: bash docker/keycloak/smoke.sh
+#
+# Only the infrastructure (what the tests and `bun run start` use):
+#
+#   docker compose up -d --wait postgres ministack     (or: bun run infra:up)
 x-app-environment: &app-environment
   PORT: "3000"
   DATABASE_URL: postgresql://wagering:wagering@postgres:5432/wagering
@@ -9,8 +24,17 @@ x-app-environment: &app-environment
   AWS_SECRET_ACCESS_KEY: test
   SQS_QUEUE_NAME: wager-transactions.fifo
   SQS_DLQ_NAME: wager-transactions-dlq.fifo
+  # Authentication. `none` unless AUTH_MODE=jwt is set; the rest only matters in jwt mode.
+  # The issuer is the PUBLIC address (what tokens carry in `iss`), while the API fetches the signing keys over the
+  # compose network (AUTH_JWKS_URI): the usual split between the issuer URL clients see and the internal back-channel.
+  AUTH_MODE: ${AUTH_MODE:-none}
+  AUTH_ISSUER: http://localhost:8081/realms/wagering
+  AUTH_JWKS_URI: http://keycloak:8080/realms/wagering/protocol/openid-connect/certs
+  AUTH_AUDIENCE: wagering-api
+  AUTH_ALLOW_INSECURE_ISSUER: "true" # plain http is acceptable for this local demo only
 
 services:
+  # ───────────── infrastructure ─────────────
   postgres:
     image: postgres:17-alpine
     environment:
@@ -36,6 +60,7 @@ services:
       timeout: 3s
       retries: 20
 
+  # ───────────── the application ─────────────
   # One-shot: applies the migrations, then exits. The app starts only after it succeeded.
   migrate:
     build: .
@@ -50,6 +75,8 @@ services:
     build: .
     ports: ["3000:3000"]
     environment: *app-environment
+    # No dependency on keycloak: in jwt mode the API discovers the identity provider lazily and answers 503 until it is
+    # up, so it never waits for (or is blocked by) a system it does not use when authentication is off.
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -66,3 +93,91 @@ services:
       start_period: 5s
     # Time for the graceful shutdown: drain in-flight SQS messages, finish the outbox batch.
     stop_grace_period: 30s
+
+  # A stand-in for a downstream system: reads the domain events the outbox publishes (wager-events.fifo), drops repeated
+  # event ids, checks per-wallet order and shows the stream on a small page.
+  events-consumer:
+    build: .
+    command: ["bun", "tools/events-consumer/main.ts"]
+    ports: ["3100:3100"]
+    environment:
+      PORT: "3100"
+      AWS_ENDPOINT_URL: http://ministack:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      SQS_EVENTS_QUEUE_NAME: wager-events.fifo
+    depends_on:
+      ministack:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://localhost:3100/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    stop_grace_period: 15s
+
+  # ───────────── identity provider ─────────────
+  # Imports docker/keycloak/wagering-realm.json: two game providers (acme, globex) and an operations client, all with the
+  # client-credentials grant. DEVELOPMENT ONLY (public sample secrets).
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://localhost:8081
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./docker/keycloak/wagering-realm.json:/opt/keycloak/data/import/wagering-realm.json:ro
+    ports: ["8081:8080"]
+    healthcheck:
+      # The image has neither curl nor wget; the management port (9000) serves the health endpoint.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          echo -e 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '"status": "UP"' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  # ───────────── observability ─────────────
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=2d"]
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Read-only access without logging in, straight to the dashboard (this is a local demo).
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/wagering.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3001:3000"]
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30

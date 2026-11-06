@@ -108,7 +108,16 @@ describe('the page cannot turn data into markup', () => {
     expect(html).not.toMatch(/<script(?![^>]*\bsrc=)[^>]*>/i); // only <script src="...">
     expect(html).not.toMatch(/\son[a-z]+\s*=/i); // onclick=, onerror=, ...
     expect(html).not.toMatch(/\sstyle\s*=/i);
-    expect(html).not.toMatch(/(?:src|href)\s*=\s*["']https?:\/\//i);
+    // No external RESOURCE (script, stylesheet, image, frame...). Plain links to the other local systems of the compose
+    // stack are navigation, not resources, and may only point at localhost.
+    expect(html).not.toMatch(/\ssrc\s*=\s*["']https?:\/\//i);
+    expect(html).not.toMatch(/<link[^>]+href\s*=\s*["']https?:\/\//i);
+    for (const [, href] of html.matchAll(/<a\s[^>]*href\s*=\s*["'](https?:\/\/[^"']+)["']/gi)) {
+      expect(href).toMatch(/^http:\/\/localhost:\d+\/?$/);
+    }
+    for (const tag of html.matchAll(/<a\s[^>]*target\s*=\s*["']_blank["'][^>]*>/gi)) {
+      expect(tag[0]).toContain('noopener'); // a link opened in a new tab must not get a handle on this window
+    }
     expect(html).not.toMatch(/javascript:/i);
   });
 

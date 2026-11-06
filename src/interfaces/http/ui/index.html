@@ -11,6 +11,13 @@
     <div>
       <h1>Wagering Processor <span class="muted">test console</span></h1>
       <p class="muted small">Drive the API from the browser and watch what it does. Everything here is a plain HTTP call to this same server.</p>
+      <nav class="links small" aria-label="Other systems of the compose stack">
+        <span class="muted">Also running with <code>docker compose up</code>:</span>
+        <a href="http://localhost:3100" target="_blank" rel="noopener noreferrer">Events consumer</a>
+        <a href="http://localhost:3001" target="_blank" rel="noopener noreferrer">Grafana</a>
+        <a href="http://localhost:9090" target="_blank" rel="noopener noreferrer">Prometheus</a>
+        <a href="http://localhost:8081" target="_blank" rel="noopener noreferrer">Keycloak</a>
+      </nav>
     </div>
     <div class="conn" aria-live="polite">
       <span class="chip" id="chip-live" title="GET /health/live">live <b>…</b></span>

@@ -1,0 +1,10 @@
+# Scrapes the API's /metrics (Prometheus text format). Short interval so the demo dashboard feels live.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: wagering-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["app:3000"]

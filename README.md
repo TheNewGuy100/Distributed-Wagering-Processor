@@ -12,13 +12,33 @@ Design decisions, trade-offs and known limitations: **[ARCHITECTURE.md](ARCHITEC
 ### Everything in containers (only Docker needed)
 
 ```bash
-docker compose up --build        # PostgreSQL + MiniStack, then migrations, then the app
+docker compose up --build        # the whole system, one command (about a minute the first time)
 ```
 
-Compose builds the image, starts PostgreSQL and MiniStack, runs the migrations in a one-shot `migrate` service and
-starts `app` only after it succeeded and both dependencies are healthy. The API is on `http://localhost:3000`
-(`/health/ready` is the container healthcheck). `docker compose stop app` is a graceful shutdown (in-flight SQS
-messages and the outbox batch finish first; about 1 s). `docker compose down -v` removes everything.
+Eight services come up, in dependency order, each with a healthcheck (`up --wait` returns when all are healthy):
+
+| What | URL | Notes |
+|---|---|---|
+| **API + test console** | http://localhost:3000 (`/ui`) | PostgreSQL, MiniStack (SQS) and a one-shot `migrate` come first; `app` starts only after the migrations succeeded |
+| **Events consumer** | http://localhost:3100 | A stand-in downstream system: reads the events the outbox publishes, drops repeated event ids, checks per-wallet order |
+| **Grafana** | http://localhost:3001 | Opens straight on the provisioned dashboard "Wagering Processor" (no login to look; `admin`/`admin` to edit) |
+| **Prometheus** | http://localhost:9090 | Scrapes the API's `/metrics` every 5 s |
+| **Keycloak** | http://localhost:8081 | Identity provider with a demo realm (`admin`/`admin` for its console) |
+| PostgreSQL / MiniStack | `localhost:5432` / `localhost:4566` | |
+
+Authentication is **off by default**, so the API and the console work without a token. Keycloak is already running; turn the
+authentication on for the same stack with one variable (the `app` container is recreated, nothing else):
+
+```bash
+AUTH_MODE=jwt docker compose up -d app
+bash docker/keycloak/smoke.sh        # real tokens from Keycloak: roles, provider scoping, tampering
+docker compose up -d app             # and back to no authentication
+```
+
+Handy: `docker compose stop app` is a graceful shutdown (in-flight SQS messages and the outbox batch finish first; about
+1 s), `docker compose up -d --build app` rebuilds just the API, `docker compose down -v` removes everything.
+Only the infrastructure (what the tests and `bun run start` use): `bun run infra:up`. Memory: the full stack wants a few GB
+(Keycloak and Grafana are the heavy ones).
 
 ### Try it in the browser: the test console
 
@@ -198,7 +218,7 @@ the security checks: ARCHITECTURE.md, section 10.
 ### Try it with a real Keycloak
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.auth.yml up -d --build --wait
+AUTH_MODE=jwt docker compose up -d --build --wait     # the whole stack (Keycloak included) with authentication on
 bash docker/keycloak/smoke.sh        # tokens, roles, provider scoping, tampering, public probes
 
 # by hand: a token for game provider "acme" (client-credentials grant), then a request with it
@@ -209,4 +229,4 @@ curl -s -H "authorization: Bearer $TOKEN" localhost:3000/providers/acme/wagering
 
 The demo realm (`docker/keycloak/wagering-realm.json`) has clients `provider-acme`, `provider-globex` (roles
 `wager:submit`, `wager:read`, scoped to their provider) and `ops-admin` (`admin`). Its secrets are public sample values:
-**development only**. `docker compose -f docker-compose.yml -f docker-compose.auth.yml down -v` removes it.
+**development only**. In the browser console, paste a token into the "Bearer token" field to use the API with authentication on.
