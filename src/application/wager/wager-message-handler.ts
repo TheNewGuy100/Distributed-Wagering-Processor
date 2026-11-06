@@ -5,8 +5,8 @@ import { IdempotencyConflictError, ValidationError, WalletNotFoundError } from '
 import { asObject, requiredString } from '../validation';
 import { LogContext } from '../../infrastructure/observability/log-context';
 import { MetricsService } from '../../infrastructure/observability/metrics.service';
-import { InboxMessage } from '../../infrastructure/persistence/entities';
-import { insertIgnoringConflict } from '../../infrastructure/persistence/orm-helpers';
+import { InboxMessage } from '../../domain/inbox-message';
+import { InboxRepository } from '../inbox.repository';
 import { ProcessWagerTransaction, type ProcessResult } from './process-wager-transaction';
 import { parseWagerCommand } from './wager-command';
 
@@ -34,11 +34,11 @@ export const MESSAGE_TYPE = 'WagerTransactionRequested';
  * Queue message envelope: `{ messageId, type, occurredAt, data }`. The business `messageId` (not the broker's) is the
  * inbox key, so a producer that re-sends the same logical message with a new broker id is still deduplicated.
  */
-function parseEnvelope(raw: unknown): { messageId: string; data: Record<string, unknown> } {
+function parseEnvelope(raw: unknown): { messageId: string; type: string; data: Record<string, unknown> } {
   const o = asObject(raw);
   const messageId = requiredString(o, 'messageId', 255);
   if (o.type !== MESSAGE_TYPE) throw new ValidationError(`type must be ${MESSAGE_TYPE}`);
-  return { messageId, data: asObject(o.data) };
+  return { messageId, type: MESSAGE_TYPE, data: asObject(o.data) };
 }
 
 const isTransientInfra = (e: unknown): boolean => {
@@ -63,15 +63,18 @@ export class WagerMessageHandler {
     @Inject(EntityManager) private readonly em: EntityManager,
     @Inject(ProcessWagerTransaction) private readonly processor: ProcessWagerTransaction,
     @Inject(ConsumerHooks) private readonly hooks: ConsumerHooks,
+    @Inject(InboxRepository) private readonly inbox: InboxRepository,
     @Inject(MetricsService) private readonly metrics: MetricsService,
   ) {}
 
   async handle(msg: InboundMessage): Promise<MessageOutcome> {
     let cmd;
     let inboxId: string;
+    let received: InboxMessage;
     try {
       const env = parseEnvelope(JSON.parse(msg.body));
       inboxId = env.messageId;
+      received = InboxMessage.receive(CONSUMER_NAME, env.messageId, { type: env.type, data: env.data });
       const data = env.data;
       cmd = parseWagerCommand(data, typeof data.idempotencyKey === 'string' ? data.idempotencyKey : undefined);
     } catch (e) {
@@ -85,13 +88,12 @@ export class WagerMessageHandler {
     try {
       outcome = await this.em.fork().transactional(async (tx) => {
         // The inbox primary key (consumer, message id) decides: a redelivered message inserts nothing.
-        const claimed = await insertIgnoringConflict(
-          tx,
-          InboxMessage,
-          { consumer: CONSUMER_NAME, messageId: inboxId },
-          'messageId',
-        );
-        if (!claimed) return { kind: 'ACK', reason: 'duplicate' } as const;
+        const verdict = await this.inbox.record(tx, received);
+        if (verdict === 'DUPLICATE') return { kind: 'ACK', reason: 'duplicate' } as const;
+        // Same message id, different content: a producer bug. Applying or swallowing it would both be wrong.
+        if (verdict === 'PAYLOAD_CONFLICT') {
+          return { kind: 'DLQ', reason: 'messageId reused with a different payload' } as const;
+        }
         const result = await this.processor.runWithin(tx, cmd);
         settled = result;
         return { kind: 'ACK', reason: 'processed', status: result.transaction.status } as const;
@@ -101,6 +103,10 @@ export class WagerMessageHandler {
       return this.classify(e, msg);
     }
 
+    if (outcome.kind === 'DLQ') {
+      this.metrics.inc('inbox_payload_conflicts_total'); // the only DLQ verdict decided inside the transaction
+      return outcome;
+    }
     if (outcome.kind === 'ACK' && outcome.reason === 'duplicate') {
       this.metrics.inc('wager_duplicates_total', { source: 'sqs', layer: 'inbox' });
     } else if (settled) {
@@ -110,6 +116,22 @@ export class WagerMessageHandler {
     // Committed. A crash from here on is exactly the "worker died before ack" case.
     await this.hooks.afterCommit?.(inboxId);
     return outcome;
+  }
+
+  /**
+   * Called by the consumer just before it dead-letters a message whose retries ran out. When the message is a valid
+   * wager command, it is recorded as FAILED so the provider gets a definite answer; never throws (the message goes to
+   * the DLQ regardless).
+   */
+  async recordExhausted(msg: InboundMessage): Promise<void> {
+    try {
+      const env = parseEnvelope(JSON.parse(msg.body));
+      const data = env.data;
+      const cmd = parseWagerCommand(data, typeof data.idempotencyKey === 'string' ? data.idempotencyKey : undefined);
+      await this.processor.recordFailed(cmd);
+    } catch (e) {
+      this.logger.warn(`could not record the failure of message ${msg.messageId}: ${(e as Error).message}`);
+    }
   }
 
   private classify(e: unknown, msg: InboundMessage): MessageOutcome {

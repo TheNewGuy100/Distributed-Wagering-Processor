@@ -10,6 +10,8 @@ export const FailureCode = {
   ReferenceNotProcessed: 'REFERENCE_NOT_PROCESSED',
   ReferenceNotReversible: 'REFERENCE_NOT_REVERSIBLE',
   AlreadyReversed: 'ALREADY_REVERSED',
+  /** Technical, not a business verdict: processing kept failing and was given up on. The provider may resend. */
+  ProcessingFailed: 'PROCESSING_FAILED',
 } as const;
 export type FailureCode = (typeof FailureCode)[keyof typeof FailureCode];
 

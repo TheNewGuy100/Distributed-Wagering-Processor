@@ -65,6 +65,7 @@ describe('catalog: guarantees exist by name', () => {
       'ledger_balance_after_non_negative',
       'ledger_balance_before_non_negative',
       'ledger_balance_arithmetic',
+      'outbox_not_published_and_dead',
       'ledger_direction_valid',
       'wager_tx_kind_valid',
       'wager_tx_status_valid',

@@ -25,19 +25,24 @@ export class MetricsBootstrap implements OnModuleInit {
     m.describe('sqs_dead_letter_total', 'Messages moved to the DLQ, by class of reason');
     m.describe('pending_reference_retries_total', 'Pending-reference re-evaluations by result');
     m.describe('outbox_events_published_total', 'Outbox events published to the events queue');
-    m.describe('outbox_publish_failures_total', 'Outbox events the broker refused (will be retried)');
+    m.describe('outbox_publish_failures_total', 'Outbox events the broker refused (retried with backoff)');
+    m.describe('inbox_payload_conflicts_total', 'Messages whose id was seen before with different content (producer bug)');
+    m.describe('outbox_events_dead_total', 'Outbox events given up on after too many refusals (need a human)');
     m.describe('transient_infra_errors_total', 'Transient infrastructure errors surfaced as HTTP 503');
 
     m.gauge('outbox_unpublished_events', 'Committed outbox events not yet published', async () => {
-      return [{ value: await this.em.fork().count(OutboxEvent, { publishedAt: null }) }];
+      return [{ value: await this.em.fork().count(OutboxEvent, { publishedAt: null, deadAt: null }) }];
     });
     // Raw on purpose: the age must be measured with the database clock (now()), the clock that stamped created_at.
     m.gauge('outbox_lag_seconds', 'Age of the oldest unpublished outbox event (0 when empty)', async () => {
       const [r] = await this.em.fork().execute<{ age: number }[]>(
         `select coalesce(extract(epoch from (now() - min(created_at))), 0)::float8 as age
-           from outbox_events where published_at is null`,
+           from outbox_events where published_at is null and dead_at is null`,
       );
       return [{ value: Math.round((r?.age ?? 0) * 1000) / 1000 }];
+    });
+    m.gauge('outbox_dead_events', 'Outbox events that are DEAD and still need attention', async () => {
+      return [{ value: await this.em.fork().count(OutboxEvent, { deadAt: { $ne: null } }) }];
     });
     m.gauge('pending_reference_transactions', 'Transactions currently waiting for their reference', async () => {
       return [{ value: await this.em.fork().count(WagerTransaction, { status: 'PENDING_REFERENCE' }) }];

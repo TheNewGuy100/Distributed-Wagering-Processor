@@ -12,6 +12,8 @@ import { AUTH_CONFIG, loadAuthConfig, type AuthConfig } from './interfaces/http/
 import { JwtAuthenticator } from './interfaces/http/auth/jwt-authenticator';
 import { MikroOrmModule } from '@mikro-orm/nestjs';
 import { buildOrmConfig } from './infrastructure/persistence/mikro-orm.config';
+import { InboxRepository } from './application/inbox.repository';
+import { SqlInboxRepository } from './infrastructure/persistence/inbox.repository';
 import { ProcessWagerTransaction } from './application/wager/process-wager-transaction';
 import { ConsumerHooks, WagerMessageHandler } from './application/wager/wager-message-handler';
 import { WalletService } from './application/wallet/wallet-service';
@@ -57,6 +59,7 @@ import { SqsConsumer } from './interfaces/sqs/sqs-consumer.service';
     OutboxHooks,
     OutboxPublisher,
     ConsumerHooks,
+    { provide: InboxRepository, useClass: SqlInboxRepository },
     ProcessWagerTransaction,
     WagerMessageHandler,
     SqsConsumer,

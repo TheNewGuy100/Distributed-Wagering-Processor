@@ -1,11 +1,13 @@
 import {
   DeleteMessageCommand,
   ReceiveMessageCommand,
+  SendMessageBatchCommand,
   SQSClient,
   type Message,
 } from '@aws-sdk/client-sqs';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { OutboxHooks } from '../../src/infrastructure/outbox/outbox-publisher.service';
+import { MetricsService } from '../../src/infrastructure/observability/metrics.service';
+import { OutboxHooks, OutboxPublisher } from '../../src/infrastructure/outbox/outbox-publisher.service';
 import { SqsQueues } from '../../src/infrastructure/sqs/sqs-queues.service';
 import { api, bootApp, createWallet, expectLedgerConsistent, uid, wager, type TestApp } from './helpers';
 
@@ -38,7 +40,7 @@ beforeAll(async () => {
   eventsUrl = t.app.get(SqsQueues).eventsUrl;
   sqs = new SQSClient({ region: 'us-east-1', endpoint: process.env.AWS_ENDPOINT_URL ?? 'http://localhost:4566' });
   // Leftovers of other test files must not be published into this file's queue.
-  await t.orm.em.fork().execute('update outbox_events set published_at = now() where published_at is null');
+  await t.orm.em.fork().execute('update outbox_events set published_at = now() where published_at is null and dead_at is null');
 }, 30000);
 
 afterAll(async () => {
@@ -225,7 +227,9 @@ describe('delivery guarantees', () => {
     };
     try {
       const events = await collect((e) => mine.has(e.aggregateId), (g) => g.length >= wanted);
-      expect(crashes).toBeGreaterThanOrEqual(2);
+      // The whole backlog now travels in one batch, so the broker already has everything after the first crash;
+      // keep going until the publisher has crashed twice and then recovered.
+      await waitFor(async () => crashes >= 2, 15000, 'two simulated crashes');
       expect(new Set(events.map((e) => e.eventId)).size).toBe(wanted); // FIFO dedup absorbed the re-sends
       await waitFor(async () => (await pendingFor([...mine])) === 0 && true, 15000, 'outbox drained');
     } finally {
@@ -250,4 +254,103 @@ describe('delivery guarantees', () => {
     expect(await pendingFor([...mine])).toBe(0);
     expect((await api(t, 'GET', `/wallets/${w.walletId}`)).body.balance.amount).toBe('15.00');
   }, 60000);
+});
+
+describe('outbox retry and batching', () => {
+  const manual = { ...env, OUTBOX_ENABLED: 'false', OUTBOX_RETRY_BASE_MS: '300', OUTBOX_RETRY_MAX_MS: '600', OUTBOX_MAX_ATTEMPTS: '3' };
+
+  /** Replaces the broker call: records every batch and refuses what `refuse` selects (nothing is really sent). */
+  function stubBroker(pub: TestApp, refuse: (e: { MessageGroupId?: string; Id?: string; MessageDeduplicationId?: string }, indexInGroup: number) => boolean) {
+    const client = pub.app.get(SqsQueues).client;
+    const batches: { MessageGroupId?: string; Id?: string; MessageDeduplicationId?: string }[][] = [];
+    const real = client.send.bind(client);
+    (client as any).send = async (cmd: unknown, ...rest: unknown[]) => {
+      if (!(cmd instanceof SendMessageBatchCommand)) return (real as any)(cmd, ...rest);
+      const entries = cmd.input.Entries!;
+      batches.push(entries.map((e) => ({ ...e })));
+      const seen = new Map<string, number>();
+      const ok: { Id: string }[] = [];
+      const bad: { Id: string; Code: string; Message: string; SenderFault: boolean }[] = [];
+      for (const e of entries) {
+        const n = seen.get(e.MessageGroupId!) ?? 0;
+        seen.set(e.MessageGroupId!, n + 1);
+        if (refuse(e, n)) bad.push({ Id: e.Id!, Code: 'Refused', Message: 'simulated refusal', SenderFault: false });
+        else ok.push({ Id: e.Id! });
+      }
+      return { Successful: ok, Failed: bad } as any;
+    };
+    return { batches, restore: () => ((client as any).send = real) };
+  }
+
+  const row = async (aggregateId: string) =>
+    t.orm.em.fork().execute<{ id: string; seq: string; attempts: number; published: boolean; dead: boolean; due_in_ms: number | null; last_error: string | null }[]>(
+      `select id, seq, attempts, published_at is not null as published, dead_at is not null as dead,
+              (extract(epoch from (next_attempt_at - now())) * 1000)::int as due_in_ms, last_error
+         from outbox_events where aggregate_id = ? order by seq`,
+      [aggregateId],
+    );
+
+  test('a refused event backs off, keeps its wallet in order, and goes DEAD after the limit without blocking it forever', async () => {
+    const w = await createWallet(t, '50.00');
+    await wager(t, w, { amount: '5.00' });
+    const pub = await bootApp(manual);
+    const publisher = pub.app.get(OutboxPublisher);
+    const [first, second] = await row(w.walletId);
+    expect(first && second).toBeTruthy();
+    // refuse only the FIRST event of this wallet; the broker "accepts" its second one in the same batch
+    const stub = stubBroker(pub, (e) => e.MessageDeduplicationId === first!.id);
+    try {
+
+      await publisher.publishOnce();
+      let [a, b] = await row(w.walletId);
+      expect(a).toMatchObject({ attempts: 1, published: false, dead: false });
+      expect(a!.last_error).toContain('simulated refusal');
+      expect(a!.due_in_ms).toBeGreaterThan(0); // scheduled in the future, by the database clock
+      expect(b).toMatchObject({ published: false }); // not marked: it must not overtake the refused one
+
+      // not due yet: nothing of this wallet is claimed
+      const before = stub.batches.length;
+      await publisher.publishOnce();
+      const touched = stub.batches.slice(before).flat().filter((e) => e.MessageGroupId === w.walletId);
+      expect(touched).toHaveLength(0);
+
+      // backoff elapsed: second refusal, then the third one is fatal (OUTBOX_MAX_ATTEMPTS=3)
+      await Bun.sleep(450);
+      await publisher.publishOnce();
+      [a] = await row(w.walletId);
+      expect(a).toMatchObject({ attempts: 2, dead: false });
+      await Bun.sleep(700);
+      await publisher.publishOnce();
+      [a, b] = await row(w.walletId);
+      expect(a).toMatchObject({ attempts: 3, dead: true, published: false });
+      expect(pub.app.get(MetricsService).total('outbox_events_dead_total')).toBe(1);
+
+      // the DEAD event no longer blocks its wallet: the next cycle publishes the second one
+      await publisher.publishOnce();
+      [, b] = await row(w.walletId);
+      expect(b).toMatchObject({ published: true, dead: false });
+    } finally {
+      stub.restore();
+      await pub.close();
+    }
+  }, 30000);
+
+  test('a hot wallet drains many events per cycle, in order', async () => {
+    const w = await createWallet(t, '100.00');
+    await Promise.all(Array.from({ length: 6 }, () => wager(t, w, { amount: '1.00' })));
+    const pub = await bootApp(manual);
+    const stub = stubBroker(pub, () => false);
+    try {
+      expect(await pub.app.get(OutboxPublisher).publishOnce()).toBeGreaterThan(0);
+      const forWallet = stub.batches.flat().filter((e) => e.MessageGroupId === w.walletId);
+      // before: one event per aggregate per cycle; now the wallet's backlog rides in a single batch
+      expect(forWallet.length).toBeGreaterThanOrEqual(5);
+      const seqs = (await row(w.walletId)).filter((r) => r.published).map((r) => BigInt(r.seq));
+      expect(seqs.length).toBe(forWallet.length);
+      expect(seqs).toEqual([...seqs].sort((x, y) => (x < y ? -1 : 1)));
+    } finally {
+      stub.restore();
+      await pub.close();
+    }
+  }, 30000);
 });

@@ -220,12 +220,62 @@ describe('SQS consumer', () => {
     expect(await expectLedgerConsistent(t, w.walletId)).toEqual({ balance: '90.00', entries: 2 }); // only the first applied
   });
 
+  test('a reused messageId with different content is dead-lettered, not swallowed as a duplicate', async () => {
+    const w = await createWallet(t, '100.00');
+    const first = wagerBody(w);
+    const messageId = uid('reused');
+    await send(first, w.playerId, undefined, messageId);
+    await waitFor(() => txByExternal(first.externalTransactionId));
+
+    const other = wagerBody(w, { amount: '7.00' });
+    await send(other, w.playerId, undefined, messageId); // same messageId, a different business message
+    const dead = await findInDlq((b) => b.includes(other.externalTransactionId));
+    expect(dead.reason).toContain('different payload');
+    expect(await txByExternal(other.externalTransactionId)).toBeNull(); // never applied
+    expect(await inboxCount(messageId)).toBe(1);
+    expect(await expectLedgerConsistent(t, w.walletId)).toEqual({ balance: '90.00', entries: 2 });
+
+    // the identical message again is still just a duplicate
+    await send(first, w.playerId, undefined, messageId);
+    await waitFor(async () => (await queueDepth()) === 0, 15000, 'queue drained');
+    expect(await expectLedgerConsistent(t, w.walletId)).toEqual({ balance: '90.00', entries: 2 });
+  });
+
   test('retries are bounded: exhausted messages land in the DLQ', async () => {
     const marker = uid('ghost');
     await send(wagerBody({ playerId: marker, walletId: randomUUID(), currency: 'BRL' }, { externalTransactionId: marker }), marker);
     const dead = await findInDlq((b) => b.includes(marker), 40000);
     expect(dead.reason).toContain('retries exhausted');
+    // the provider gets a definite answer instead of "unknown": FAILED, nothing moved
+    const tx = await txByExternal(marker);
+    expect(tx).toMatchObject({ status: 'FAILED', failureCode: 'PROCESSING_FAILED', walletId: null });
   }, 60000);
+
+  test('a resend of a FAILED request reopens it and applies it exactly once; a different payload conflicts', async () => {
+    const w = await createWallet(t, '100.00');
+    const cmd = wagerBody(w) as Record<string, any>;
+    // make it fail for real: ask the use case to record the failure the way the consumer does after exhausting retries
+    const { WagerMessageHandler } = await import('../../src/application/wager/wager-message-handler');
+    const handler = t.app.get(WagerMessageHandler);
+    await handler.recordExhausted({
+      messageId: 'x',
+      body: JSON.stringify(envelope(cmd)),
+    });
+    expect(await txByExternal(cmd.externalTransactionId)).toMatchObject({ status: 'FAILED', walletId: w.walletId });
+    expect(await expectLedgerConsistent(t, w.walletId)).toEqual({ balance: '100.00', entries: 1 });
+
+    const headers = { 'idempotency-key': `${cmd.providerId}:${cmd.externalTransactionId}` };
+    const clash = await api(t, 'POST', '/wagering/transactions', { ...cmd, money: { amount: '99.00', currency: 'BRL' } }, headers);
+    expect(clash.status).toBe(409); // not the same request: no reopening
+
+    const reopened = await api(t, 'POST', '/wagering/transactions', cmd, headers);
+    expect(reopened.status).toBe(201);
+    expect(reopened.body).toMatchObject({ status: 'PROCESSED', idempotentReplay: false, balance: { amount: '90.00', currency: 'BRL' } });
+    const again = await api(t, 'POST', '/wagering/transactions', cmd, headers);
+    expect(again.status).toBe(200);
+    expect(again.body.idempotentReplay).toBe(true);
+    expect(await expectLedgerConsistent(t, w.walletId)).toEqual({ balance: '90.00', entries: 2 });
+  });
 });
 
 describe('multiple instances and shutdown', () => {

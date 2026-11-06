@@ -32,7 +32,7 @@ beforeAll(async () => {
   t = await bootApp(env);
   metrics = t.app.get(MetricsService);
   t.app.useLogger(new JsonLogger('log')); // tests default to 'error' only; capture everything here
-  await t.orm.em.fork().execute('update outbox_events set published_at = now() where published_at is null');
+  await t.orm.em.fork().execute('update outbox_events set published_at = now() where published_at is null and dead_at is null');
 }, 30000);
 
 afterAll(async () => {

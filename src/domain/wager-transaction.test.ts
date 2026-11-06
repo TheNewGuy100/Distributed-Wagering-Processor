@@ -4,7 +4,7 @@ import { InvariantViolationError } from './errors';
 
 describe('status machine', () => {
   test('terminal states are final', () => {
-    for (const from of ['PROCESSED', 'REJECTED', 'FAILED'] as const) {
+    for (const from of ['PROCESSED', 'REJECTED'] as const) {
       expect(isTerminal(from)).toBe(true);
       for (const to of ['PENDING', 'PENDING_REFERENCE', 'PROCESSED', 'REJECTED', 'FAILED'] as const) {
         expect(() => assertTransition(from, to)).toThrow(InvariantViolationError);
@@ -16,6 +16,14 @@ describe('status machine', () => {
     expect(() => assertTransition('PENDING_REFERENCE', 'PROCESSED')).not.toThrow();
     expect(() => assertTransition('PENDING_REFERENCE', 'REJECTED')).not.toThrow();
     expect(isTerminal('PENDING_REFERENCE')).toBe(false);
+  });
+  test('FAILED is a resting state: the only way out is a reopen to PENDING', () => {
+    expect(isTerminal('FAILED')).toBe(false);
+    expect(() => assertTransition('FAILED', 'PENDING')).not.toThrow();
+    for (const to of ['PENDING_REFERENCE', 'PROCESSED', 'REJECTED', 'FAILED'] as const) {
+      expect(() => assertTransition('FAILED', to)).toThrow(InvariantViolationError);
+    }
+    expect(() => assertTransition('PENDING', 'FAILED')).not.toThrow();
   });
   test('cannot go back to PENDING', () => {
     expect(() => assertTransition('PENDING_REFERENCE', 'PENDING')).toThrow(InvariantViolationError);

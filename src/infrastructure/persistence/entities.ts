@@ -141,6 +141,8 @@ export const InboxMessage = defineEntity({
   properties: {
     consumer: p.text().primary(),
     messageId: p.text().fieldName('message_id').primary(),
+    /** Hash of the message content, so a reused message id with different content is detected, not swallowed. */
+    payloadHash: p.text().fieldName('payload_hash').nullable(),
     receivedAt: p.datetime().fieldName('received_at').columnType('timestamptz').defaultRaw('now()'),
   },
 });
@@ -161,18 +163,24 @@ export const OutboxEvent = defineEntity({
     publishedAt: p.datetime().fieldName('published_at').columnType('timestamptz').nullable(),
     attempts: p.integer().default(0),
     lastError: p.text().fieldName('last_error').nullable(),
+    /** After a refused publish: not claimable before this instant (database clock). */
+    nextAttemptAt: p.datetime().fieldName('next_attempt_at').columnType('timestamptz').nullable(),
+    /** Gave up after too many refusals; no longer blocks its aggregate, needs a human. */
+    deadAt: p.datetime().fieldName('dead_at').columnType('timestamptz').nullable(),
   },
   indexes: [
     {
       name: 'outbox_events_unpublished',
-      expression: 'create index outbox_events_unpublished on outbox_events (seq) where published_at is null',
+      expression:
+        'create index outbox_events_unpublished on outbox_events (seq) where published_at is null and dead_at is null',
     },
     {
       name: 'outbox_events_unpublished_by_aggregate',
       expression:
-        'create index outbox_events_unpublished_by_aggregate on outbox_events (aggregate_id, seq) where published_at is null',
+        'create index outbox_events_unpublished_by_aggregate on outbox_events (aggregate_id, seq) where published_at is null and dead_at is null',
     },
   ],
+  checks: [{ name: 'outbox_not_published_and_dead', expression: 'published_at is null or dead_at is null' }],
 });
 
 export const entities = [Wallet, WagerTransaction, LedgerEntry, InboxMessage, OutboxEvent];

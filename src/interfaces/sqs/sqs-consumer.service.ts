@@ -157,6 +157,7 @@ export class SqsConsumer implements OnApplicationBootstrap, BeforeApplicationShu
           return await this.deadLetter(m, outcome.reason);
         case 'RETRY':
           if (receiveCount >= this.config.maxReceiveCount) {
+            await this.handler.recordExhausted({ messageId, body: m.Body ?? '' }); // FAILED, then the DLQ
             this.metrics.inc('sqs_dead_letter_total', { reason: 'retries_exhausted' });
             this.metrics.inc('sqs_messages_total', { outcome: 'dead_lettered' });
             return await this.deadLetter(m, `retries exhausted: ${outcome.reason}`);

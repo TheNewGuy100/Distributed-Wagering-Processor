@@ -6,10 +6,13 @@ import { MetricsService } from '../../infrastructure/observability/metrics.servi
 import { WagerTransaction } from '../../infrastructure/persistence/entities';
 import { insertIgnoringConflict } from '../../infrastructure/persistence/orm-helpers';
 import { lockWalletById } from '../../infrastructure/persistence/wallet-repository';
+import { FailureCode } from '../../domain/errors';
+import { assertTransition } from '../../domain/wager-transaction';
+import type { Wallet } from '../../domain/wallet';
 import { ApplicationError, IdempotencyConflictError, ValidationError, WalletNotFoundError } from '../errors';
 import { PENDING_CONFIG, type PendingConfig } from './pending-reference.config';
 import { settleTransaction } from './settle-transaction';
-import { findTransactionByExternal, toView, type WagerTransactionView } from './transaction-view';
+import { findTransactionByExternal, toView, type TransactionRow, type WagerTransactionView } from './transaction-view';
 import type { ProcessWagerCommand } from './wager-command';
 
 export interface ProcessResult {
@@ -119,9 +122,19 @@ export class ProcessWagerTransaction {
       },
       'id',
     );
-    if (!claimed) return this.replay(tx, cmd);
+    if (!claimed) return this.replay(tx, wallet, cmd);
     LogContext.set({ transactionId });
+    return this.settle(tx, wallet, transactionId, cmd, createdAt);
+  }
 
+  /** Decides and persists one claimed transaction (a new one, or a FAILED one reopened) and builds the response. */
+  private async settle(
+    tx: EntityManager,
+    wallet: Wallet,
+    transactionId: string,
+    cmd: ProcessWagerCommand,
+    createdAt: Date,
+  ): Promise<ProcessResult> {
     const outcome = await settleTransaction(
       tx,
       wallet,
@@ -167,13 +180,72 @@ export class ProcessWagerTransaction {
     };
   }
 
-  private async replay(tx: EntityManager, cmd: ProcessWagerCommand): Promise<ProcessResult> {
+  /**
+   * Gives up on a request whose processing kept failing for technical reasons (the queue consumer calls this just
+   * before dead-lettering): the provider then sees a definite FAILED instead of "unknown". No ledger entry, no balance
+   * change. A resend of the same request reopens it (see `reopen`). Best effort and idempotent.
+   */
+  async recordFailed(cmd: ProcessWagerCommand): Promise<boolean> {
+    const recorded = await this.em.fork().transactional(async (tx) => {
+      const wallet = await lockWalletById(tx, cmd.walletId); // wallet first, as everywhere (null: it never existed)
+      const own = wallet && wallet.playerId === cmd.playerId ? wallet : null;
+      const now = new Date();
+      return insertIgnoringConflict(
+        tx,
+        WagerTransaction,
+        {
+          id: randomUUID(),
+          providerId: cmd.providerId,
+          externalTransactionId: cmd.externalTransactionId,
+          idempotencyKey: cmd.idempotencyKey,
+          payloadHash: cmd.payloadHash,
+          kind: cmd.kind,
+          status: 'FAILED',
+          failureCode: FailureCode.ProcessingFailed,
+          playerId: cmd.playerId,
+          currency: cmd.currency,
+          amount: cmd.amount.toString(),
+          roundId: cmd.roundId,
+          gameId: cmd.gameId,
+          wallet: own?.id ?? null,
+          balanceAfter: own ? own.balance.toString() : null,
+          referenceExternalId: cmd.referenceExternalId,
+          createdAt: now,
+          updatedAt: now,
+        },
+        'id',
+      );
+    });
+    if (recorded) this.metrics.inc('wager_transactions_total', { kind: cmd.kind, status: 'FAILED', source: 'sqs' });
+    return recorded;
+  }
+
+  /** A resend of the very same request (same key, same payload) after a FAILED: run it again from PENDING. */
+  private async reopen(
+    tx: EntityManager,
+    wallet: Wallet,
+    failed: TransactionRow,
+    cmd: ProcessWagerCommand,
+  ): Promise<ProcessResult> {
+    assertTransition('FAILED', 'PENDING');
+    await tx.nativeUpdate(
+      WagerTransaction,
+      { id: failed.id },
+      { status: 'PENDING', failureCode: null, wallet: wallet.id, balanceAfter: null, updatedAt: new Date() },
+    );
+    LogContext.set({ transactionId: failed.id });
+    this.metrics.inc('wager_failed_reopened_total');
+    return this.settle(tx, wallet, failed.id, cmd, new Date(failed.createdAt));
+  }
+
+  private async replay(tx: EntityManager, wallet: Wallet, cmd: ProcessWagerCommand): Promise<ProcessResult> {
     const byExternal = await findTransactionByExternal(tx, cmd.providerId, cmd.externalTransactionId);
     if (byExternal) {
       if (byExternal.idempotencyKey !== cmd.idempotencyKey || byExternal.payloadHash !== cmd.payloadHash) {
         this.metrics.inc('wager_idempotency_conflicts_total');
         throw new IdempotencyConflictError();
       }
+      if (byExternal.status === 'FAILED') return this.reopen(tx, wallet, byExternal, cmd);
       LogContext.set({ transactionId: byExternal.id });
       return { transaction: toView(byExternal), idempotentReplay: true };
     }

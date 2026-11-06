@@ -7,6 +7,7 @@ import {
   type BeforeApplicationShutdown,
   type OnApplicationBootstrap,
 } from '@nestjs/common';
+import { OutboxMessage } from '../../domain/outbox-message';
 import { MetricsService } from '../observability/metrics.service';
 import { OutboxEvent } from '../persistence/entities';
 import { SqsQueues } from '../sqs/sqs-queues.service';
@@ -83,25 +84,38 @@ export class OutboxPublisher implements OnApplicationBootstrap, BeforeApplicatio
 
   /** One claim → send → mark cycle. Returns how many rows it claimed. */
   async publishOnce(): Promise<number> {
-    const stats = { claimed: 0, sent: 0, failed: 0 };
+    const stats = { claimed: 0, sent: 0, failed: 0, dead: 0 };
     await this.em.fork().transactional(async (tx) => {
-      // Only the head of each aggregate is claimable (no earlier unpublished event of the same aggregate), and
-      // rows another publisher already holds are skipped. The correlated NOT EXISTS is the one raw fragment: the
-      // query builder has no vocabulary for a self-correlated anti-join.
-      const rows = await tx
+      // Heads: the first live event of each aggregate that is due (never tried, or its backoff elapsed), skipping rows
+      // another publisher holds. The correlated NOT EXISTS is the one raw fragment: the query builder has no
+      // vocabulary for a self-correlated anti-join. Published and DEAD events no longer hold their aggregate back.
+      const heads = await tx
         .createQueryBuilder(OutboxEvent, 'o')
         .select('*')
-        .where({ publishedAt: null })
+        .where({ publishedAt: null, deadAt: null })
+        .andWhere(raw('(o.next_attempt_at is null or o.next_attempt_at <= now())'))
         .andWhere(
           raw(
-            'not exists (select 1 from outbox_events p where p.aggregate_id = o.aggregate_id and p.published_at is null and p.seq < o.seq)',
+            'not exists (select 1 from outbox_events p where p.aggregate_id = o.aggregate_id and p.published_at is null and p.dead_at is null and p.seq < o.seq)',
           ),
         )
         .orderBy({ seq: 'asc' })
         .limit(this.config.batchSize)
         .setLockMode(LockMode.PESSIMISTIC_PARTIAL_WRITE)
         .getResultList();
-      if (rows.length === 0) return;
+      if (heads.length === 0) return;
+
+      // Holding a head keeps every later event of that aggregate unclaimable by others, so the followers need no lock
+      // of their own: they ride in the same batch, in order, which lets a hot wallet drain faster than one event per
+      // cycle. A global seq order keeps an in-order prefix of every aggregate when the batch is cut at 10 entries.
+      const headSeq = new Map(heads.map((h) => [h.aggregateId, BigInt(h.seq)]));
+      const later = await tx.find(
+        OutboxEvent,
+        { aggregateId: { $in: [...headSeq.keys()] }, publishedAt: null, deadAt: null },
+        { orderBy: { seq: 'asc' } },
+      );
+      const followers = later.filter((r) => BigInt(r.seq) > headSeq.get(r.aggregateId)!);
+      const rows = [...heads, ...followers].sort((x, y) => (BigInt(x.seq) < BigInt(y.seq) ? -1 : 1)).slice(0, 10);
       stats.claimed = rows.length;
 
       const res = await this.queues.client.send(
@@ -117,22 +131,60 @@ export class OutboxPublisher implements OnApplicationBootstrap, BeforeApplicatio
         }),
       );
 
-      const sentIds = (res.Successful ?? []).map((s) => rows[Number(s.Id)]!.id);
-      stats.sent = sentIds.length;
-      stats.failed = (res.Failed ?? []).length;
-      if (sentIds.length > 0) {
-        await tx.nativeUpdate(
-          OutboxEvent,
-          { id: { $in: sentIds } },
-          { publishedAt: raw('now()') as never, attempts: raw('attempts + 1') as never },
-        );
+      // A refused event holds back the later events of its aggregate even if the broker took them (they are sent again
+      // after it, protected by the dedup id), so consumers still see each wallet's events in order.
+      const refused = new Map(
+        (res.Failed ?? []).map((f) => [Number(f.Id), `${f.Code ?? 'ERROR'}: ${f.Message ?? ''}`.slice(0, 500)]),
+      );
+      const blocked = new Set<string>();
+      const sentIds: string[] = [];
+      for (const [i, row] of rows.entries()) {
+        const message = OutboxMessage.rehydrate({
+          id: row.id,
+          aggregateId: row.aggregateId,
+          failedAttempts: row.attempts,
+          publishedAt: null,
+          deadAt: null,
+        });
+        if (refused.has(i)) {
+          blocked.add(row.aggregateId);
+          stats.failed++;
+          const error = refused.get(i)!;
+          const outcome = message.recordFailure(new Date(), this.config.retry);
+          if (outcome.type === 'DEAD') {
+            stats.dead++;
+            this.logger.error({
+              event: 'outbox_event_dead',
+              eventId: row.id,
+              aggregateId: row.aggregateId,
+              eventType: row.eventType,
+              error,
+            });
+            await tx.nativeUpdate(
+              OutboxEvent,
+              { id: row.id },
+              { attempts: outcome.failedAttempts, lastError: error, deadAt: raw('now()') as never },
+            );
+          } else {
+            // The due time is stamped by the database clock, the same one that decides when it is claimable.
+            await tx.nativeUpdate(
+              OutboxEvent,
+              { id: row.id },
+              {
+                attempts: outcome.failedAttempts,
+                lastError: error,
+                nextAttemptAt: raw("now() + ? * interval '1 millisecond'", [outcome.delayMs]) as never,
+              },
+            );
+          }
+        } else if (!blocked.has(row.aggregateId)) {
+          message.markPublished(new Date());
+          sentIds.push(row.id);
+        }
       }
-      for (const f of res.Failed ?? []) {
-        await tx.nativeUpdate(
-          OutboxEvent,
-          { id: rows[Number(f.Id)]!.id },
-          { attempts: raw('attempts + 1') as never, lastError: `${f.Code ?? 'ERROR'}: ${f.Message ?? ''}`.slice(0, 500) },
-        );
+      stats.sent = sentIds.length;
+      if (sentIds.length > 0) {
+        await tx.nativeUpdate(OutboxEvent, { id: { $in: sentIds } }, { publishedAt: raw('now()') as never });
       }
 
       await this.hooks.afterSend?.(sentIds); // a throw here rolls everything back: rows get re-sent
@@ -140,6 +192,7 @@ export class OutboxPublisher implements OnApplicationBootstrap, BeforeApplicatio
     // Counted only once the transaction committed.
     if (stats.sent > 0) this.metrics.inc('outbox_events_published_total', undefined, stats.sent);
     if (stats.failed > 0) this.metrics.inc('outbox_publish_failures_total', undefined, stats.failed);
+    if (stats.dead > 0) this.metrics.inc('outbox_events_dead_total', undefined, stats.dead);
     return stats.claimed;
   }
 

@@ -27,7 +27,7 @@ beforeAll(async () => {
   eventsUrl = t.app.get(SqsQueues).eventsUrl;
   sqs = new SQSClient({ region: 'us-east-1', endpoint: process.env.AWS_ENDPOINT_URL ?? 'http://localhost:4566' });
   // Leftovers of other test files must not flow into this file's queue.
-  await t.orm.em.fork().execute('update outbox_events set published_at = now() where published_at is null');
+  await t.orm.em.fork().execute('update outbox_events set published_at = now() where published_at is null and dead_at is null');
   consumer = await startEventsConsumer({ sqs, queueName: env.SQS_EVENTS_QUEUE_NAME, port: 0, waitTimeSeconds: 1, log: () => {} });
   base = `http://localhost:${consumer.port}`;
 }, 30000);

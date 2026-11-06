@@ -136,7 +136,7 @@ truncating the ledger, a negative balance and a second reversal are all rejected
 | `wallets` | Aggregate root | `CHECK balance >= 0`; `UNIQUE (player_id, currency)`; `version` bigint |
 | `wager_transactions` | One row per external transaction; also the idempotency record | `UNIQUE (provider_id, external_transaction_id)`; `UNIQUE (idempotency_key)`; status/kind `CHECK`s; `game_id` (indexed with `created_at`) and `balance_after`, the balance observed when it settled, which a replay returns verbatim; reversals must carry a reference; **partial unique index: a processed transaction has at most one processed reversal** |
 | `ledger_entries` | Append-only audit trail | `UNIQUE (wallet_id, transaction_id)` (one entry per wallet per transaction); `amount > 0`; `balance_before >= 0`, `balance_after >= 0` and `balance_after = balance_before ± amount` (an entry that does not add up cannot be inserted); **row trigger on `UPDATE`/`DELETE` and statement trigger on `TRUNCATE` raise** |
-| `inbox_messages` | Consumer-side dedup | `PRIMARY KEY (consumer, message_id)` |
+| `inbox_messages` | Consumer-side dedup | `PRIMARY KEY (consumer, message_id)`; `payload_hash` pins the content, so a reused message id with different content is detected |
 | `outbox_events` | Transactional outbox | `seq` sequence (publish order), partial indexes on unpublished rows |
 
 Money is `NUMERIC(18,2)` in SQL and `bigint` minor units in code (`Money`): immutable, non-negative, strict
@@ -218,6 +218,31 @@ reference that does not match (amount, round, player, provider, currency, wallet
   configuration drift between instances stops the deploy instead of passing unnoticed.
 
 ## 7. Outbox
+
+**State machines in the domain.** Both sides of the messaging are small domain classes with explicit transitions; the
+infrastructure only loads, claims and persists them.
+
+* `OutboxMessage`: `PENDING → PUBLISHED`, or `PENDING → PENDING` with exponential backoff after a refusal by the broker,
+  or `PENDING → DEAD` after `OUTBOX_MAX_ATTEMPTS` refusals. The retry is stored as `next_attempt_at`, stamped with the
+  *database* clock (`now() + delay`), the same one that decides whether the event is claimable. A `DEAD` event stops
+  holding its wallet back (otherwise one bad event would freeze the wallet forever), is logged at error level and counted
+  (`outbox_events_dead_total`, gauge `outbox_dead_events`); a consumer sees the gap in `walletVersion`. An outage of the
+  broker as a whole (the call itself throws) is not a refusal: nothing is counted against the events and the batch is retried.
+* Batches keep per-wallet order **and** are not limited to one event per wallet: the publisher locks the head of each
+  due aggregate (`SKIP LOCKED`) and carries that aggregate's following events in the same batch (a head held by one
+  publisher keeps the rest of its wallet unclaimable by the others). If the broker refuses one event, the later events of
+  its wallet are not marked as published even if the broker took them; they are sent again after it (dedup id = event id).
+* `InboxMessage` (port `InboxRepository`): `NEW`, `DUPLICATE` or `PAYLOAD_CONFLICT`. The key is (consumer, business
+  `messageId`); the content hash decides whether a repeat is a redelivery (acknowledged) or a producer reusing an id for a
+  different message (dead-lettered, `inbox_payload_conflicts_total`), which silently dropping would hide.
+
+**`FAILED`.** A transaction is `FAILED` when its processing kept failing for *technical* reasons and was given up on
+(`failureCode = PROCESSING_FAILED`): the queue consumer records it right before dead-lettering a valid wager command
+whose retries ran out. It has no ledger entry and does not change the balance, but the provider now reads a definite
+state instead of "unknown" (`REJECTED` stays reserved for business verdicts). `FAILED` is a resting state, not a final
+one: a resend of the very same request (same `Idempotency-Key`, same payload) reopens it (`FAILED → PENDING`) and runs
+it from scratch, under the wallet lock, so it is applied exactly once; the same key with another payload is a 409 as always.
+HTTP never produces it: a failing request answers 4xx/503 and the provider resends. No event is published for it.
 
 Events (`WagerTransactionProcessed`, `WagerTransactionRejected`, `WagerTransactionPendingReference`,
 `WalletBalanceChanged`) are rows in `outbox_events`, inserted in the same transaction as the change; nothing is
@@ -350,11 +375,13 @@ name in the catalog **and** by behaviour, every migration reversible, no entity/
 * **Outbox throughput under sustained load**: the GitHub Actions load test (358 req/s) produced events faster than the
   publishers sent them: lag peaked at 14 s and the backlog took 28.5 s to drain. Events of one wallet are published in
   order, so hot wallets are the slowest to drain. More publisher instances help across wallets, not within one.
-* **Outbox head-of-line blocking**: an event the broker permanently refuses blocks later events of the same aggregate.
-  Alert on `outbox_lag_seconds` and `outbox_publish_failures_total`. A partially failed batch can send a later event
-  of an aggregate before an earlier one; consumers can reorder with `walletVersion`.
-* **Clock skew**: retry times are computed with the application clock and compared with the database clock. Instances
-  with noticeably skewed clocks delay or advance retries (not correctness).
+* **Outbox head-of-line blocking**: an event the broker refuses holds back the later events of the same wallet while
+  it backs off (that is what keeps the order). After `OUTBOX_MAX_ATTEMPTS` it goes `DEAD` and the wallet moves on, so
+  consumers must be able to tolerate a gap in `walletVersion`. Alert on `outbox_lag_seconds`, `outbox_publish_failures_total`
+  and `outbox_dead_events`.
+* **Clock skew**: pending-reference retry times are computed with the application clock and compared with the database
+  clock; instances with noticeably skewed clocks delay or advance those retries (not correctness). Outbox retries use the
+  database clock only.
 * **Metrics are per-process counters** (reset on restart); aggregate them in Prometheus. The conflict metric is a
   wait-time heuristic (≥ `LOCK_CONFLICT_THRESHOLD_MS`), not a PostgreSQL lock counter.
 * **MiniStack is an emulator**: FIFO and DLQ semantics are verified by the contract test, but real AWS SQS (limits,

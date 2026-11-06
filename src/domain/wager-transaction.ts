@@ -1,19 +1,20 @@
 import { InvariantViolationError } from './errors';
 import type { TransactionStatus } from './wager-rules';
 
-export const TERMINAL_STATUSES: readonly TransactionStatus[] = ['PROCESSED', 'REJECTED', 'FAILED'];
+/** Final for good. FAILED is a resting state: the effect never happened, and a resend of the same request reopens it. */
+export const TERMINAL_STATUSES: readonly TransactionStatus[] = ['PROCESSED', 'REJECTED'];
 
 const ALLOWED: Record<TransactionStatus, readonly TransactionStatus[]> = {
   PENDING: ['PROCESSED', 'REJECTED', 'FAILED', 'PENDING_REFERENCE'],
   PENDING_REFERENCE: ['PROCESSED', 'REJECTED', 'FAILED', 'PENDING_REFERENCE'],
   PROCESSED: [],
   REJECTED: [],
-  FAILED: [],
+  FAILED: ['PENDING'], // reopened by a resend of the very same request (same key, same payload)
 };
 
 export const isTerminal = (s: TransactionStatus): boolean => TERMINAL_STATUSES.includes(s);
 
-/** Guards status changes: terminal states can never change again. */
+/** Guards status changes: PROCESSED and REJECTED can never change again. */
 export function assertTransition(from: TransactionStatus, to: TransactionStatus): void {
   if (!ALLOWED[from].includes(to)) {
     throw new InvariantViolationError(`illegal status transition ${from} -> ${to}`);

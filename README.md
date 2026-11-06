@@ -162,6 +162,7 @@ See [.env.example](.env.example) for the basics. Tuning knobs, all optional:
 | `SQS_RETRY_BASE_SECONDS` / `SQS_RETRY_MAX_SECONDS` | `2` / `300` | Exponential redelivery backoff |
 | `SQS_VISIBILITY_TIMEOUT_SECONDS` | `30` | Must be identical on every instance (queue attribute) |
 | `OUTBOX_ENABLED` / `OUTBOX_PUBLISHERS` | `true` / `2` | Outbox publisher loops per instance |
+| `OUTBOX_RETRY_BASE_MS` / `OUTBOX_RETRY_MAX_MS` / `OUTBOX_MAX_ATTEMPTS` | `1000` / `60000` / `20` | Backoff for an event the broker refuses, and how many refusals make it `DEAD` |
 | `PENDING_WORKER_ENABLED` | `true` | Retry worker for reversals that arrived before their reference |
 | `PENDING_MAX_RETRIES` / `PENDING_BASE_DELAY_MS` / `PENDING_MAX_DELAY_MS` | `8` / `1000` / `300000` | Backoff before `REFERENCE_NOT_FOUND` |
 | `LOCK_CONFLICT_THRESHOLD_MS` | `25` | Wallet lock wait counted as a conflict |
