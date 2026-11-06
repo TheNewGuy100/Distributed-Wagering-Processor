@@ -61,11 +61,19 @@ export class SqsConsumer implements OnApplicationBootstrap, BeforeApplicationShu
     if (this.loops.length === 0) return;
     this.stopping = true;
     this.abort.abort();
-    const grace = sleep(this.config.shutdownGraceMs).then(() => 'timeout' as const);
-    const result = await Promise.race([Promise.allSettled(this.loops).then(() => 'drained' as const), grace]);
+    // The grace timer MUST be cancelled once the loops drained: left pending, it keeps the process alive for the
+    // whole grace period after everything else has stopped (a 20 s `docker stop` for a 1 s shutdown).
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const grace = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), this.config.shutdownGraceMs);
+    });
+    const result = await Promise.race([Promise.allSettled(this.loops).then(() => 'drained' as const), grace]).finally(() =>
+      clearTimeout(timer),
+    );
     if (result === 'timeout') {
       this.logger.warn(`shutdown grace elapsed with ${this.inFlight} message(s) in flight; they will be redelivered`);
     }
+    this.logger.log({ event: 'shutdown', component: 'sqs-consumer', result, inFlight: this.inFlight });
   }
 
   private async pollLoop(): Promise<void> {

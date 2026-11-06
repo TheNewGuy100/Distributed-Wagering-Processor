@@ -57,10 +57,16 @@ export class OutboxPublisher implements OnApplicationBootstrap, BeforeApplicatio
     if (this.loops.length === 0) return;
     this.stopping = true;
     for (const w of this.wakers) w();
-    await Promise.race([
-      Promise.allSettled(this.loops),
-      new Promise<void>((r) => setTimeout(r, this.config.shutdownGraceMs)),
-    ]);
+    // Cancel the grace timer when the loops finish, or it keeps the process alive for the whole grace period.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const grace = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, this.config.shutdownGraceMs);
+    });
+    const result = await Promise.race([
+      Promise.allSettled(this.loops).then(() => 'drained' as const),
+      grace.then(() => 'timeout' as const),
+    ]).finally(() => clearTimeout(timer));
+    this.logger.log({ event: 'shutdown', component: 'outbox-publisher', result });
   }
 
   private async run(): Promise<void> {

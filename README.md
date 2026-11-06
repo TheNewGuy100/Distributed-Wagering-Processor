@@ -9,17 +9,32 @@ Design decisions, trade-offs and known limitations: **[ARCHITECTURE.md](ARCHITEC
 
 ## Quick start
 
+### Everything in containers (only Docker needed)
+
+```bash
+docker compose up --build        # PostgreSQL + MiniStack, then migrations, then the app
+```
+
+Compose builds the image, starts PostgreSQL and MiniStack, runs the migrations in a one-shot `migrate` service and
+starts `app` only after it succeeded and both dependencies are healthy. The API is on `http://localhost:3000`
+(`/health/ready` is the container healthcheck). `docker compose stop app` is a graceful shutdown (in-flight SQS
+messages and the outbox batch finish first; about 1 s). `docker compose down -v` removes everything.
+
+### Local development (Bun on the host, infra in containers)
+
 Requirements: [Bun](https://bun.sh) 1.4+, Docker (with Compose).
 
 ```bash
 bun install
 cp .env.example .env
-bun run infra:up          # PostgreSQL + MiniStack, waits until healthy
+bun run infra:up          # PostgreSQL + MiniStack only, waits until healthy
 bun run migration:up      # create the schema
 bun run start             # API + SQS consumer + outbox publisher + pending-reference worker
 ```
 
-The API listens on `http://localhost:3000`. Queues are created on startup.
+The API listens on `http://localhost:3000`. Queues are created on startup. **Do not run the `app` container and the
+integration tests at the same time**: a second consumer, outbox publisher and retry worker would race the tests for
+their rows and queues. The test helpers detect an instance on port 3000 and stop with an explanation.
 
 ```bash
 curl -s -X POST localhost:3000/wallets -H 'content-type: application/json' \
@@ -33,7 +48,8 @@ curl -s -X POST localhost:3000/wagering/transactions -H 'content-type: applicati
 
 | Command | What it does |
 |---|---|
-| `bun run infra:up` / `infra:down` | Start / stop (and wipe) PostgreSQL and MiniStack |
+| `bun run infra:up` / `infra:down` | Start / stop (and wipe) PostgreSQL and MiniStack only |
+| `bun run stack:up` / `stack:down` | Build and start / stop (and wipe) the whole stack including the app container |
 | `bun run migration:up` / `migration:down` | Apply / revert the last migration (migrations are reversible) |
 | `bun run migration:create [name]` | Generate a migration from the entity changes; **add its `down()`** (a test enforces it) |
 | `bun run migration:check` | Fail if the entities and the migrated database differ (schema drift); runs in CI |

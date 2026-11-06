@@ -33,6 +33,21 @@ Layers: `domain/` (pure TypeScript: `Money`, `Wallet`, rules, events, no framewo
 One NestJS process runs everything; each part can be switched off per instance (`SQS_CONSUMER_ENABLED`,
 `OUTBOX_ENABLED`, `PENDING_WORKER_ENABLED`) so roles can be split later without code changes.
 
+### Packaging and deployment shape
+
+`docker compose up --build` runs the whole system: `postgres` and `ministack` (healthchecked), a one-shot `migrate`
+service (same image, `bun scripts/migrate.ts up`) and `app`, which starts only after `migrate` completed successfully
+and both dependencies are healthy. The image is a two-stage `oven/bun` build (production dependencies only, installed
+from the lockfile; the TypeScript sources run directly, `tsconfig.json` ships because Bun reads the decorator settings
+from it), runs as the unprivileged `bun` user, uses exec-form `CMD` so Bun is PID 1 and receives `SIGTERM`, and has a
+readiness healthcheck plus a 30 s `stop_grace_period`. Running migrations as a separate, single step avoids N replicas
+racing to migrate at start-up (concurrent migrators were not tested here, so the design does not rely on them being safe).
+
+CI builds this image and tests the stack through the container (readiness, a wallet, a bet, an idempotent replay,
+reconciliation, `/metrics`, and a prompt graceful stop). The integration tests deliberately do **not** run against the
+`app` container: they boot their own instances, and a second consumer or outbox publisher on the same database would race
+them, so the test helpers refuse to run when something answers on port 3000.
+
 ### Persistence: MikroORM end to end
 
 MikroORM owns the whole data path: the connection pool, transactions (`em.transactional`), the **entities**
@@ -154,6 +169,13 @@ reference that does not match (amount, round, player, provider, currency, wallet
   group's batch is released untouched to preserve order.
 * Shutdown: stop polling (abort the long poll), let in-flight messages finish (bounded by
   `SQS_SHUTDOWN_GRACE_MS`), release received-but-unstarted messages. Redelivery is harmless thanks to the inbox.
+  The outbox publisher stops the same way. Both log a `shutdown` event with the result (`drained` or `timeout`).
+  The grace timers are cancelled as soon as the loops drain: left pending, they once kept the process alive for the
+  whole grace period (a 20 s `docker stop` for a 1 s shutdown), found by running the image for real. As PID 1 in a
+  container the signal Nest re-raises after its hooks is ignored by the kernel, so only an empty event loop ends the
+  process; `process-shutdown.test.ts` reproduces exactly that (a fixture registers a no-op SIGTERM listener) and was
+  verified to fail when the timer leak is reintroduced. It needs POSIX signals, so it runs on Linux (CI) and is skipped
+  on Windows.
 * Queue creation is idempotent but strict: `CreateQueue` fails if an existing queue has different attributes, so
   configuration drift between instances stops the deploy instead of passing unnoticed.
 

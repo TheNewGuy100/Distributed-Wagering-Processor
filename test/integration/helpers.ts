@@ -14,7 +14,32 @@ export interface TestApp {
   close(): Promise<void>;
 }
 
+/**
+ * Integration tests share the database with anything else that runs the application: a second consumer, outbox
+ * publisher or retry worker (the docker-compose `app` container, `bun run start`) would race the tests for their
+ * rows and queues, and fail them in confusing ways. Fail early with the fix instead.
+ */
+let stackChecked: Promise<void> | undefined;
+function assertNoStackRunning(): Promise<void> {
+  stackChecked ??= (async () => {
+    try {
+      const res = await fetch('http://localhost:3000/health/live', { signal: AbortSignal.timeout(500) });
+      if (res.ok) {
+        throw new Error(
+          'An application instance answers on http://localhost:3000 (the docker-compose `app` container or ' +
+            '`bun run start`). Stop it before running the integration tests: `bun run stack:down` or `docker compose stop app`.',
+        );
+      }
+    } catch (e) {
+      if ((e as Error).message.startsWith('An application instance')) throw e;
+      // nothing listening: good
+    }
+  })();
+  return stackChecked;
+}
+
 export async function bootApp(env: Record<string, string> = {}): Promise<TestApp> {
+  await assertNoStackRunning();
   // HTTP-only tests keep the consumer off; SQS tests turn it on and pick their own queues.
   process.env.SQS_CONSUMER_ENABLED = 'false';
   process.env.OUTBOX_ENABLED = 'false';
