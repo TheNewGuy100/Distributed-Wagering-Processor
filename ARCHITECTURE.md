@@ -347,6 +347,9 @@ name in the catalog **and** by behaviour, every migration reversible, no entity/
 
 * **Per-wallet throughput is bounded by the row lock.** Correctness over speed for one wallet; scaling comes from
   many wallets in parallel (load test: hot wallets show up as lock conflicts, not errors).
+* **Outbox throughput under sustained load**: the GitHub Actions load test (358 req/s) produced events faster than the
+  publishers sent them: lag peaked at 14 s and the backlog took 28.5 s to drain. Events of one wallet are published in
+  order, so hot wallets are the slowest to drain. More publisher instances help across wallets, not within one.
 * **Outbox head-of-line blocking**: an event the broker permanently refuses blocks later events of the same aggregate.
   Alert on `outbox_lag_seconds` and `outbox_publish_failures_total`. A partially failed batch can send a later event
   of an aggregate before an earlier one; consumers can reorder with `walletVersion`.

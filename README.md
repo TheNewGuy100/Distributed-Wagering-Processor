@@ -197,6 +197,13 @@ large (the same code varied by about 50% between runs). The load generator, both
 machine, so read it as relative, not as capacity. The A/B history (raw SQL vs ORM vs optimized ORM) is in
 ARCHITECTURE.md (limitations).
 
+Reference run on GitHub Actions (`ubuntu-latest`, 4 vCPU AMD EPYC 7763, 17 GB, PostgreSQL 17, Bun 1.4.4, 2 instances,
+30 s, concurrency 64, 50 wallets, [run 42265737037](https://github.com/TheNewGuy100/Distributed-Wagering-Processor/actions/runs/42265737037)):
+10,794 requests, **358 req/s, p50 155 ms, p95 376 ms, p99 535 ms, max 967 ms, 0 % errors**, 2,153 wallet lock
+conflicts (waits, not failures), 570 duplicates absorbed (the 5 % replays), 0 diverging wallets. The outbox fell
+behind under load (**max lag 14 s, 28.5 s to drain** 19,459 events): the API sustains more than a single publisher
+loop publishes per second, and the two hot wallets serialize their own events. Same shared-machine caveat as above.
+
 ## License
 
 All rights reserved. The code is public so it can be read and evaluated; no permission to use, copy, modify or
