@@ -12,6 +12,8 @@
     "infra:down": "docker compose down -v",
     "migration:up": "bun scripts/migrate.ts up",
     "migration:down": "bun scripts/migrate.ts down",
+    "migration:create": "bun scripts/migrate.ts create",
+    "migration:check": "bun scripts/migrate.ts check",
     "test": "bun test",
     "test:unit": "bun test src",
     "test:integration": "bun test test/integration --timeout 90000",

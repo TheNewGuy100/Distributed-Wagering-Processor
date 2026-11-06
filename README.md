@@ -35,6 +35,8 @@ curl -s -X POST localhost:3000/wagering/transactions -H 'content-type: applicati
 |---|---|
 | `bun run infra:up` / `infra:down` | Start / stop (and wipe) PostgreSQL and MiniStack |
 | `bun run migration:up` / `migration:down` | Apply / revert the last migration (migrations are reversible) |
+| `bun run migration:create [name]` | Generate a migration from the entity changes; **add its `down()`** (a test enforces it) |
+| `bun run migration:check` | Fail if the entities and the migrated database differ (schema drift); runs in CI |
 | `bun run start` / `dev` | Run the service / run with reload |
 | `bun run typecheck` | `tsc --noEmit` in strict mode |
 | `bun run test:unit` | Domain unit tests, no I/O |
@@ -125,10 +127,12 @@ traffic aimed at two hot wallets), waits for the outbox to drain, reconciles eve
 wrong. The report (also in `load-test-report.json`) lists environment, methodology, throughput, p50/p95/p99, error
 rate, wallet lock conflicts and outbox lag. In GitHub Actions it is the manual **Load test** workflow.
 
-Reference run on a developer machine (Ryzen 7 5700X, 16 threads, PostgreSQL 17 in Docker, Bun 1.4.4, 2 instances, 8 s,
-concurrency 64): ~456 req/s, p50 128 ms, p95 274 ms, p99 425 ms, 0 % errors, 686 lock conflicts, outbox drained in 4.9 s,
-0 diverging wallets. Load generator, both instances and the databases share the machine, so read it as relative, not as
-capacity.
+Reference runs on a developer machine (Ryzen 7 5700X, 16 threads, PostgreSQL 17 in Docker on Windows, Bun 1.4.4,
+2 instances, 10 s, concurrency 64, fresh database each run): **~320–390 req/s, p50 145–190 ms, p95 330–420 ms,
+p99 470–610 ms, 0 % errors**, ~400–860 lock conflicts, 0 diverging wallets, outbox drained in seconds. Run-to-run
+variance on this setup is large (the slowest run was about a third of the fastest). The load generator, both instances
+and the databases share the machine, so read it as relative, not as capacity. An A/B against the earlier raw-SQL version
+of the hot path is in ARCHITECTURE.md (limitations).
 
 ## License
 

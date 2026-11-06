@@ -1,27 +1,8 @@
 import type { EntityManager } from '@mikro-orm/postgresql';
+import { WagerTransaction, type WagerTransactionEntity } from '../../infrastructure/persistence/entities';
 import { TransactionNotFoundError } from '../errors';
 
-export interface TransactionRow {
-  id: string;
-  provider_id: string;
-  external_transaction_id: string;
-  idempotency_key: string;
-  payload_hash: string;
-  kind: string;
-  status: string;
-  player_id: string;
-  currency: string;
-  amount: string;
-  round_id: string | null;
-  wallet_id: string | null;
-  reference_external_id: string | null;
-  reference_transaction_id: string | null;
-  failure_code: string | null;
-  retry_count: number;
-  next_retry_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
+export type TransactionRow = WagerTransactionEntity;
 
 export interface WagerTransactionView {
   transactionId: string;
@@ -42,43 +23,37 @@ export interface WagerTransactionView {
   updatedAt: string;
 }
 
-const iso = (v: string | null): string | null => (v === null ? null : new Date(v).toISOString());
+const iso = (d: Date | null | undefined): string | null => (d ? new Date(d).toISOString() : null);
 
 export const toView = (r: TransactionRow): WagerTransactionView => ({
   transactionId: r.id,
-  providerId: r.provider_id,
-  externalTransactionId: r.external_transaction_id,
+  providerId: r.providerId,
+  externalTransactionId: r.externalTransactionId,
   kind: r.kind,
   status: r.status,
-  playerId: r.player_id,
-  walletId: r.wallet_id,
+  playerId: r.playerId,
+  walletId: r.wallet ?? null,
   amount: r.amount,
   currency: r.currency,
-  roundId: r.round_id,
-  referenceExternalId: r.reference_external_id,
-  failureCode: r.failure_code,
-  retryCount: r.retry_count,
-  nextRetryAt: iso(r.next_retry_at),
-  createdAt: iso(r.created_at)!,
-  updatedAt: iso(r.updated_at)!,
+  roundId: r.roundId ?? null,
+  referenceExternalId: r.referenceExternalId ?? null,
+  failureCode: r.failureCode ?? null,
+  retryCount: r.retryCount,
+  nextRetryAt: iso(r.nextRetryAt),
+  createdAt: iso(r.createdAt)!,
+  updatedAt: iso(r.updatedAt)!,
 });
 
-export async function findTransactionById(em: EntityManager, id: string): Promise<TransactionRow | null> {
-  const rows = await em.execute<TransactionRow[]>('select * from wager_transactions where id = ?', [id]);
-  return rows[0] ?? null;
-}
+// `refresh` skips the identity map: rows are also changed with native updates, so a cached entity could be stale.
+export const findTransactionById = (em: EntityManager, id: string): Promise<TransactionRow | null> =>
+  em.findOne(WagerTransaction, { id }, { refresh: true });
 
-export async function findTransactionByExternal(
+export const findTransactionByExternal = (
   em: EntityManager,
   providerId: string,
   externalId: string,
-): Promise<TransactionRow | null> {
-  const rows = await em.execute<TransactionRow[]>(
-    'select * from wager_transactions where provider_id = ? and external_transaction_id = ?',
-    [providerId, externalId],
-  );
-  return rows[0] ?? null;
-}
+): Promise<TransactionRow | null> =>
+  em.findOne(WagerTransaction, { providerId, externalTransactionId: externalId }, { refresh: true });
 
 export async function getTransactionView(em: EntityManager, id: string): Promise<WagerTransactionView> {
   const row = await findTransactionById(em, id);

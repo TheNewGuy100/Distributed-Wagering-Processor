@@ -3,7 +3,9 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { LogContext } from '../../infrastructure/observability/log-context';
 import { MetricsService } from '../../infrastructure/observability/metrics.service';
-import { lockWalletByPlayer } from '../../infrastructure/persistence/wallet-sql';
+import { WagerTransaction } from '../../infrastructure/persistence/entities';
+import { insertIgnoringConflict } from '../../infrastructure/persistence/orm-helpers';
+import { lockWalletByPlayer } from '../../infrastructure/persistence/wallet-repository';
 import { ApplicationError, IdempotencyConflictError, WalletNotFoundError } from '../errors';
 import { PENDING_CONFIG, type PendingConfig } from './pending-reference.config';
 import { settleTransaction } from './settle-transaction';
@@ -93,29 +95,28 @@ export class ProcessWagerTransaction {
     LogContext.set({ walletId: wallet.id });
 
     const transactionId = randomUUID();
-    const claimed = await tx.execute<{ id: string }[]>(
-      `insert into wager_transactions
-         (id, provider_id, external_transaction_id, idempotency_key, payload_hash, kind, status,
-          player_id, currency, amount, round_id, wallet_id, reference_external_id)
-       values (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?)
-       on conflict do nothing
-       returning id`,
-      [
-        transactionId,
-        cmd.providerId,
-        cmd.externalTransactionId,
-        cmd.idempotencyKey,
-        cmd.payloadHash,
-        cmd.kind,
-        cmd.playerId,
-        cmd.currency,
-        cmd.amount.toString(),
-        cmd.roundId,
-        wallet.id,
-        cmd.referenceExternalId,
-      ],
+    // The unique constraints (idempotency key, provider + external id) are the arbiter: a duplicate inserts nothing.
+    const claimed = await insertIgnoringConflict(
+      tx,
+      WagerTransaction,
+      {
+        id: transactionId,
+        providerId: cmd.providerId,
+        externalTransactionId: cmd.externalTransactionId,
+        idempotencyKey: cmd.idempotencyKey,
+        payloadHash: cmd.payloadHash,
+        kind: cmd.kind,
+        status: 'PENDING',
+        playerId: cmd.playerId,
+        currency: cmd.currency,
+        amount: cmd.amount.toString(),
+        roundId: cmd.roundId,
+        wallet: wallet.id,
+        referenceExternalId: cmd.referenceExternalId,
+      },
+      'id',
     );
-    if (claimed.length === 0) return this.replay(tx, cmd);
+    if (!claimed) return this.replay(tx, cmd);
     LogContext.set({ transactionId });
 
     await settleTransaction(
@@ -144,7 +145,7 @@ export class ProcessWagerTransaction {
   private async replay(tx: EntityManager, cmd: ProcessWagerCommand): Promise<ProcessResult> {
     const byExternal = await findTransactionByExternal(tx, cmd.providerId, cmd.externalTransactionId);
     if (byExternal) {
-      if (byExternal.idempotency_key !== cmd.idempotencyKey || byExternal.payload_hash !== cmd.payloadHash) {
+      if (byExternal.idempotencyKey !== cmd.idempotencyKey || byExternal.payloadHash !== cmd.payloadHash) {
         this.metrics.inc('wager_idempotency_conflicts_total');
         throw new IdempotencyConflictError();
       }

@@ -1,6 +1,7 @@
-import { EntityManager } from '@mikro-orm/postgresql';
+import { EntityManager, raw } from '@mikro-orm/postgresql';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { MetricsService } from '../../infrastructure/observability/metrics.service';
+import { Wallet } from '../../infrastructure/persistence/entities';
 import { WalletNotFoundError } from '../errors';
 import { assertUuid } from '../validation';
 
@@ -39,7 +40,9 @@ export class ReconciliationService {
     assertUuid(walletId, 'walletId');
     const em = this.em.fork();
 
-    // One statement = one snapshot, so concurrent traffic cannot make a healthy wallet look divergent.
+    // One statement = one snapshot, so concurrent traffic cannot make a healthy wallet look divergent. This is the
+    // one deliberate raw query: a grouped aggregate over the ledger joined to the wallet has no ORM equivalent that
+    // keeps the single-snapshot guarantee.
     const rows = await em.execute<
       {
         currency: string;
@@ -82,12 +85,14 @@ export class ReconciliationService {
       this.logger.error(
         JSON.stringify({ event: 'reconciliation_divergence', walletId, differences }),
       );
-      const flagged = await em.execute<{ flagged_at: string }[]>(
-        `update wallets set flagged_at = coalesce(flagged_at, now()), flag_reason = ?
-          where id = ? returning flagged_at`,
-        [differences.join('; ').slice(0, 1000), walletId],
+      // coalesce keeps the time of the FIRST flag; the reason is refreshed on every divergent run.
+      await em.nativeUpdate(
+        Wallet,
+        { id: walletId },
+        { flaggedAt: raw('coalesce(flagged_at, now())') as never, flagReason: differences.join('; ').slice(0, 1000) },
       );
-      flaggedAt = new Date(flagged[0]!.flagged_at).toISOString();
+      const flagged = await em.findOne(Wallet, { id: walletId }, { refresh: true });
+      flaggedAt = flagged?.flaggedAt ? new Date(flagged.flaggedAt).toISOString() : flaggedAt;
     }
 
     return {

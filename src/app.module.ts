@@ -3,7 +3,7 @@ import { Module, type MiddlewareConsumer, type NestModule } from '@nestjs/common
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { AUTHENTICATOR, AuthGuard, NoopAuthenticator } from './interfaces/http/auth/auth.port';
 import { MikroOrmModule } from '@mikro-orm/nestjs';
-import config from './infrastructure/persistence/mikro-orm.config';
+import { buildOrmConfig } from './infrastructure/persistence/mikro-orm.config';
 import { ProcessWagerTransaction } from './application/wager/process-wager-transaction';
 import { ConsumerHooks, WagerMessageHandler } from './application/wager/wager-message-handler';
 import { WalletService } from './application/wallet/wallet-service';
@@ -25,7 +25,7 @@ import { WalletsController } from './interfaces/http/wallets.controller';
 import { SqsConsumer } from './interfaces/sqs/sqs-consumer.service';
 
 @Module({
-  imports: [MikroOrmModule.forRoot(config)],
+  imports: [MikroOrmModule.forRootAsync({ useFactory: () => buildOrmConfig() })],
   controllers: [HealthController, WalletsController, WageringController, MetricsController],
   providers: [
     { provide: SQS_CONFIG, useFactory: () => loadSqsConfig() },

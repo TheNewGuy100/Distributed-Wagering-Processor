@@ -5,10 +5,13 @@ import { WagerTransactionProcessed, WalletBalanceChanged } from '../../domain/ev
 import { Wallet } from '../../domain/wallet';
 import { enqueueEvent } from '../../infrastructure/outbox/outbox-writer';
 import {
-  persistWalletChanges,
-  walletFromRow,
-  type WalletRow,
-} from '../../infrastructure/persistence/wallet-sql';
+  LedgerEntry,
+  WagerTransaction,
+  Wallet as WalletSchema,
+  type WalletEntity,
+} from '../../infrastructure/persistence/entities';
+import { insertIgnoringConflict } from '../../infrastructure/persistence/orm-helpers';
+import { persistWalletChanges } from '../../infrastructure/persistence/wallet-repository';
 import { ValidationError, WalletAlreadyExistsError, WalletNotFoundError } from '../errors';
 import { asObject, assertUuid, currencyField, moneyField, requiredString } from '../validation';
 
@@ -37,14 +40,14 @@ export interface LedgerPage {
   nextCursor: string | null;
 }
 
-const toView = (r: WalletRow & { flagged_at?: string | null }): WalletView => ({
-  walletId: r.id,
-  playerId: r.player_id,
-  currency: r.currency,
-  balance: r.balance,
-  version: Number(r.version),
-  createdAt: new Date(r.created_at).toISOString(),
-  flaggedAt: r.flagged_at ? new Date(r.flagged_at).toISOString() : null,
+const toView = (w: WalletEntity): WalletView => ({
+  walletId: w.id,
+  playerId: w.playerId,
+  currency: w.currency,
+  balance: w.balance,
+  version: Number(w.version),
+  createdAt: new Date(w.createdAt).toISOString(),
+  flaggedAt: w.flaggedAt ? new Date(w.flaggedAt).toISOString() : null,
 });
 
 export const encodeCursor = (seq: string | number | bigint): string =>
@@ -75,32 +78,32 @@ export class WalletService {
 
     return this.em.fork().transactional(async (tx) => {
       const walletId = randomUUID();
-      const inserted = await tx.execute<{ id: string }[]>(
-        `insert into wallets (id, player_id, currency) values (?, ?, ?)
-         on conflict (player_id, currency) do nothing returning id`,
-        [walletId, playerId, currency],
+      // One wallet per player and currency: the unique constraint decides, a duplicate inserts nothing.
+      const inserted = await insertIgnoringConflict(
+        tx,
+        WalletSchema,
+        { id: walletId, playerId, currency },
+        'id',
+        ['playerId', 'currency'],
       );
-      if (inserted.length === 0) throw new WalletAlreadyExistsError();
+      if (!inserted) throw new WalletAlreadyExistsError();
 
       if (opening && !opening.isZero()) {
         const txId = randomUUID();
         const externalId = `opening:${walletId}`;
-        await tx.execute(
-          `insert into wager_transactions
-             (id, provider_id, external_transaction_id, idempotency_key, payload_hash, kind, status,
-              player_id, currency, amount, wallet_id)
-           values (?, 'internal', ?, ?, ?, 'OPENING', 'PROCESSED', ?, ?, ?, ?)`,
-          [
-            txId,
-            externalId,
-            `internal:${externalId}`,
-            createHash('sha256').update(`${walletId}:${opening.toString()}`).digest('hex'),
-            playerId,
-            currency,
-            opening.toString(),
-            walletId,
-          ],
-        );
+        await tx.insert(WagerTransaction, {
+          id: txId,
+          providerId: 'internal',
+          externalTransactionId: externalId,
+          idempotencyKey: `internal:${externalId}`,
+          payloadHash: createHash('sha256').update(`${walletId}:${opening.toString()}`).digest('hex'),
+          kind: 'OPENING',
+          status: 'PROCESSED',
+          playerId,
+          currency,
+          amount: opening.toString(),
+          wallet: walletId,
+        });
         const wallet = Wallet.open(walletId, playerId, currency);
         const entry = wallet.credit(txId, opening);
         await persistWalletChanges(tx, wallet, 0, [entry]);
@@ -149,43 +152,29 @@ export class WalletService {
     const em = this.em.fork();
     await this.load(em, walletId); // 404 when the wallet does not exist
 
-    const rows = await em.execute<
-      {
-        seq: string;
-        id: string;
-        transaction_id: string;
-        direction: string;
-        amount: string;
-        balance_after: string;
-        created_at: string;
-      }[]
-    >(
-      `select seq, id, transaction_id, direction, amount, balance_after, created_at
-         from ledger_entries where wallet_id = ? and seq > ? order by seq asc limit ?`,
-      [walletId, after, limit + 1],
+    // Ordered by the insert-order sequence, so pages are stable even while new entries are appended.
+    const rows = await em.find(
+      LedgerEntry,
+      { wallet: walletId, seq: { $gt: after } },
+      { orderBy: { seq: 'asc' }, limit: limit + 1 },
     );
     const page = rows.slice(0, limit);
     return {
       items: page.map((r) => ({
         entryId: r.id,
-        transactionId: r.transaction_id,
+        transactionId: r.transaction,
         direction: r.direction,
         amount: r.amount,
-        balanceAfter: r.balance_after,
-        createdAt: new Date(r.created_at).toISOString(),
+        balanceAfter: r.balanceAfter,
+        createdAt: new Date(r.createdAt).toISOString(),
       })),
       nextCursor: rows.length > limit ? encodeCursor(page[page.length - 1]!.seq) : null,
     };
   }
 
   private async load(em: EntityManager, walletId: string): Promise<WalletView> {
-    const rows = await em.execute<(WalletRow & { flagged_at: string | null })[]>(
-      'select id, player_id, currency, balance, version, created_at, flagged_at from wallets where id = ?',
-      [walletId],
-    );
-    if (!rows[0]) throw new WalletNotFoundError();
-    return toView(rows[0]);
+    const w = await em.findOne(WalletSchema, { id: walletId }, { refresh: true });
+    if (!w) throw new WalletNotFoundError();
+    return toView(w);
   }
 }
-
-export { walletFromRow };

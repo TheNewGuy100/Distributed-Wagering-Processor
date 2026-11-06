@@ -33,13 +33,49 @@ Layers: `domain/` (pure TypeScript: `Money`, `Wallet`, rules, events, no framewo
 One NestJS process runs everything; each part can be switched off per instance (`SQS_CONSUMER_ENABLED`,
 `OUTBOX_ENABLED`, `PENDING_WORKER_ENABLED`) so roles can be split later without code changes.
 
-### Persistence: MikroORM, with explicit SQL on the hot path
+### Persistence: MikroORM end to end
 
-MikroORM owns the connection pool, transactions (`em.transactional`) and the reversible migrations. The financial
-core uses parameterised SQL through `em.execute` inside those transactions instead of mapped entities, because its
-correctness is defined by `INSERT … ON CONFLICT DO NOTHING`, `SELECT … FOR UPDATE [SKIP LOCKED]` and `RETURNING`;
-hiding those behind a unit of work would make the guarantees harder to read and to test. Trade-off: no entity
-mapping or change tracking, and a little more SQL to maintain.
+MikroORM owns the whole data path: the connection pool, transactions (`em.transactional`), the **entities**
+(`defineEntity`, no decorators, in `infrastructure/persistence/entities.ts`) and the **migrations, which are generated
+from those entities** (`bun run migration:create`). The financial core is written with the ORM's own vocabulary:
+
+| Need | ORM feature used | SQL it emits |
+|---|---|---|
+| Serialise a wallet | `findOne(..., { lockMode: PESSIMISTIC_WRITE })` | `select … for update` |
+| Claim idempotency key / inbox row | query builder `insert().onConflict().ignore().returning()` | `insert … on conflict do nothing returning` |
+| Lost-update guard | `nativeUpdate({ id, version }, …)` returning the affected rows | `update … where id = ? and version = ?` |
+| Outbox / retry claim | lock mode `PESSIMISTIC_PARTIAL_WRITE` | `… for update skip locked` |
+| Ledger, outbox, transactions | `insert` / `find` / `findOne` | plain DML |
+
+Entities are loaded with `refresh` and written with native operations rather than a long-lived unit of work: each request
+forks its own `EntityManager` and runs in one explicit transaction, so there is no identity-map state to leak and no
+implicit `flush` to reorder statements. A test (`lock-order.test.ts`) reads the SQL the ORM really sends and fails if
+anything touches the wallet before its `FOR UPDATE`.
+
+Raw SQL is limited to three queries, each with a reason in the code: the reconciliation aggregate (one statement = one
+snapshot), the outbox lag gauge (must use the database clock) and the `select 1` of the readiness probe. `raw()` fragments
+appear only for `now()` and for the outbox's self-correlated `NOT EXISTS`, which the query builder cannot express.
+
+**History and cost.** The first version used `em.execute` on the hot path and the ORM only for the pool and migrations,
+on the argument that the guarantees read more clearly in SQL. Typed entities, a schema that cannot silently drift from
+the code and generated migrations were judged more valuable, and the existing concurrency tests are the safety net that
+made the move safe (all of them passed unchanged). The price was measured, see the limitations.
+
+### Schema ownership and the guarantees MikroORM cannot see
+
+`bun run migration:check` (run in CI) fails if the entities and the migrated database differ. MikroORM 7 can declare
+tables, `CHECK`s, partial indexes and row-level triggers (with their PL/pgSQL function). Three things needed care:
+
+* **Statement-level `TRUNCATE` trigger**: the ORM's introspection does not see it, so declaring it on the entity would give
+  a permanent diff. It lives in a hand-written migration (`…_ledger_truncate_guard`).
+* **Identity columns**: for `identity` columns the ORM proposes `drop default`, which PostgreSQL rejects, so the sequence
+  columns are `bigserial`.
+* **Generated migrations have no `down()`**: each one is completed by hand, and a test asserts every migration defines
+  `down()` (CI also runs up → down → up).
+
+Because `migration:check` cannot vouch for everything, `schema-guarantees.test.ts` pins each critical guarantee twice:
+by **name in the catalog** (`pg_trigger`, `pg_indexes`, `pg_constraint`) and by **behaviour** (updating, deleting or
+truncating the ledger, a negative balance and a second reversal are all rejected by the database itself).
 
 ## 3. Data model and invariants
 
@@ -47,9 +83,9 @@ mapping or change tracking, and a little more SQL to maintain.
 |---|---|---|
 | `wallets` | Aggregate root | `CHECK balance >= 0`; `UNIQUE (player_id, currency)`; `version` bigint |
 | `wager_transactions` | One row per external transaction; also the idempotency record | `UNIQUE (provider_id, external_transaction_id)`; `UNIQUE (idempotency_key)`; status/kind `CHECK`s; reversals must carry a reference; **partial unique index: a processed transaction has at most one processed reversal** |
-| `ledger_entries` | Append-only audit trail | `UNIQUE (wallet_id, transaction_id)` (one entry per wallet per transaction); `amount > 0`; `balance_after >= 0`; **`UPDATE`/`DELETE`/`TRUNCATE` trigger raises** |
+| `ledger_entries` | Append-only audit trail | `UNIQUE (wallet_id, transaction_id)` (one entry per wallet per transaction); `amount > 0`; `balance_after >= 0`; **row trigger on `UPDATE`/`DELETE` and statement trigger on `TRUNCATE` raise** |
 | `inbox_messages` | Consumer-side dedup | `PRIMARY KEY (consumer, message_id)` |
-| `outbox_events` | Transactional outbox | `seq` identity (publish order), partial indexes on unpublished rows |
+| `outbox_events` | Transactional outbox | `seq` sequence (publish order), partial indexes on unpublished rows |
 
 Money is `NUMERIC(18,2)` in SQL and `bigint` minor units in code (`Money`): immutable, non-negative, strict
 `"10.00"` parsing (no floats, signs or exponents), single-currency arithmetic enforced (mixing currencies throws).
@@ -183,7 +219,18 @@ concurrency scenarios from the brief with real parallelism. MiniStack's SQS beha
 deduplication, redelivery after the visibility timeout, redrive to a DLQ) is pinned by a contract test, and the image
 version is pinned.
 
+Database-level guarantees have their own tests: `schema-guarantees.test.ts` (each trigger, partial index and `CHECK` by
+name in the catalog **and** by behaviour, every migration reversible, no entity/schema drift) and `lock-order.test.ts`
+(the SQL the ORM sends, asserting the wallet `FOR UPDATE` comes first; verified by mutation to fail when the order changes).
+
 ## 12. Known limitations and trade-offs
+
+* **The ORM costs throughput.** Same 10 statements per bet as the earlier hand-written SQL, so the cost is CPU in the ORM
+  layer (query building, hydration), not round trips. A/B on one developer machine (fresh databases, alternating order,
+  10 s, 64 concurrent, 2 instances in one process): calm runs gave ~530–700 req/s with raw SQL against ~330–390 req/s with
+  the ORM (p50 85–105 ms vs 145–170 ms), i.e. roughly 40% lower; noisy runs overlapped. Correctness tests are identical
+  in both. If throughput mattered more than the type safety and schema ownership, the hot path could go back to
+  `em.execute` without touching the rest.
 
 * **Per-wallet throughput is bounded by the row lock.** Correctness over speed for one wallet; scaling comes from
   many wallets in parallel (load test: hot wallets show up as lock conflicts, not errors).

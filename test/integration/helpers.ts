@@ -19,6 +19,7 @@ export async function bootApp(env: Record<string, string> = {}): Promise<TestApp
   process.env.SQS_CONSUMER_ENABLED = 'false';
   process.env.OUTBOX_ENABLED = 'false';
   process.env.PENDING_WORKER_ENABLED = 'false';
+  process.env.ORM_QUERY_LOG = 'false';
   for (const [k, v] of Object.entries(env)) process.env[k] = v;
   const orm = await MikroORM.init(config);
   await orm.migrator.up(); // idempotent

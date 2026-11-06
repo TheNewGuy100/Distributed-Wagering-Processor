@@ -1,4 +1,4 @@
-import { EntityManager } from '@mikro-orm/postgresql';
+import { EntityManager, LockMode, raw } from '@mikro-orm/postgresql';
 import {
   Inject,
   Injectable,
@@ -7,13 +7,13 @@ import {
   type OnApplicationBootstrap,
 } from '@nestjs/common';
 import { Money } from '../../domain/money';
+import type { TransactionKind } from '../../domain/wager-rules';
 import { LogContext } from '../../infrastructure/observability/log-context';
 import { MetricsService } from '../../infrastructure/observability/metrics.service';
-import type { TransactionKind } from '../../domain/wager-rules';
-import { lockWalletById } from '../../infrastructure/persistence/wallet-sql';
+import { WagerTransaction } from '../../infrastructure/persistence/entities';
+import { lockWalletById } from '../../infrastructure/persistence/wallet-repository';
 import { PENDING_CONFIG, type PendingConfig } from './pending-reference.config';
 import { settleTransaction } from './settle-transaction';
-import type { TransactionRow } from './transaction-view';
 
 /**
  * Re-evaluates REFUND/ROLLBACK transactions that arrived before the transaction they reverse.
@@ -62,17 +62,17 @@ export class PendingReferenceWorker implements OnApplicationBootstrap, BeforeApp
 
   /** Handles every currently due transaction; returns how many it actually settled or rescheduled. */
   async processDue(): Promise<number> {
-    const due = await this.em.fork().execute<{ id: string; wallet_id: string }[]>(
-      `select id, wallet_id from wager_transactions
-        where status = 'PENDING_REFERENCE' and next_retry_at <= now()
-        order by next_retry_at limit ?`,
-      [this.config.batchSize],
+    // "Due" is judged by the database clock (now()), the same clock that stores next_retry_at ordering.
+    const due = await this.em.fork().find(
+      WagerTransaction,
+      { status: 'PENDING_REFERENCE', nextRetryAt: { $lte: raw('now()') as never } },
+      { fields: ['id', 'wallet'], orderBy: { nextRetryAt: 'asc' }, limit: this.config.batchSize },
     );
     let handled = 0;
     for (const d of due) {
       if (this.stopping) break;
       try {
-        if (await this.retryOne(d.id, d.wallet_id)) handled++;
+        if (d.wallet && (await this.retryOne(d.id, d.wallet))) handled++;
       } catch (e) {
         this.logger.warn(`retry of ${d.id} failed, will be picked up again: ${(e as Error).message}`);
       }
@@ -90,13 +90,12 @@ export class PendingReferenceWorker implements OnApplicationBootstrap, BeforeApp
     return this.em.fork().transactional(async (tx) => {
       const wallet = await lockWalletById(tx, walletId); // wallet first, always (same order as the main path)
       if (!wallet) return false;
-      const rows = await tx.execute<TransactionRow[]>(
-        `select * from wager_transactions
-          where id = ? and status = 'PENDING_REFERENCE' and next_retry_at <= now()
-          for update skip locked`,
-        [transactionId],
+      // SKIP LOCKED: if another worker/instance already holds this row, move on instead of waiting.
+      const row = await tx.findOne(
+        WagerTransaction,
+        { id: transactionId, status: 'PENDING_REFERENCE', nextRetryAt: { $lte: raw('now()') as never } },
+        { lockMode: LockMode.PESSIMISTIC_PARTIAL_WRITE, refresh: true },
       );
-      const row = rows[0];
       if (!row) return false; // already handled by another worker/instance
 
       const outcome = await settleTransaction(
@@ -104,16 +103,16 @@ export class PendingReferenceWorker implements OnApplicationBootstrap, BeforeApp
         wallet,
         {
           transactionId: row.id,
-          providerId: row.provider_id,
-          externalTransactionId: row.external_transaction_id,
+          providerId: row.providerId,
+          externalTransactionId: row.externalTransactionId,
           kind: row.kind as TransactionKind,
-          playerId: row.player_id,
+          playerId: row.playerId,
           currency: row.currency,
           amount: Money.parse(row.amount, row.currency),
-          roundId: row.round_id,
-          referenceExternalId: row.reference_external_id,
+          roundId: row.roundId ?? null,
+          referenceExternalId: row.referenceExternalId ?? null,
           fromStatus: 'PENDING_REFERENCE',
-          retryCount: row.retry_count,
+          retryCount: row.retryCount,
         },
         this.config.policy,
       );

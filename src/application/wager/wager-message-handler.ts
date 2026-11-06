@@ -3,6 +3,8 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { DomainError } from '../../domain/errors';
 import { IdempotencyConflictError, ValidationError, WalletNotFoundError } from '../errors';
 import { MetricsService } from '../../infrastructure/observability/metrics.service';
+import { InboxMessage } from '../../infrastructure/persistence/entities';
+import { insertIgnoringConflict } from '../../infrastructure/persistence/orm-helpers';
 import { ProcessWagerTransaction, type ProcessResult } from './process-wager-transaction';
 import { parseWagerCommand } from './wager-command';
 
@@ -62,12 +64,14 @@ export class WagerMessageHandler {
     let settled: ProcessResult | null = null;
     try {
       outcome = await this.em.fork().transactional(async (tx) => {
-        const claimed = await tx.execute<{ message_id: string }[]>(
-          `insert into inbox_messages (consumer, message_id) values (?, ?)
-           on conflict do nothing returning message_id`,
-          [CONSUMER_NAME, msg.messageId],
+        // The inbox primary key (consumer, message id) decides: a redelivered message inserts nothing.
+        const claimed = await insertIgnoringConflict(
+          tx,
+          InboxMessage,
+          { consumer: CONSUMER_NAME, messageId: msg.messageId },
+          'messageId',
         );
-        if (claimed.length === 0) return { kind: 'ACK', reason: 'duplicate' } as const;
+        if (!claimed) return { kind: 'ACK', reason: 'duplicate' } as const;
         const result = await this.processor.runWithin(tx, cmd);
         settled = result;
         return { kind: 'ACK', reason: 'processed', status: result.transaction.status } as const;

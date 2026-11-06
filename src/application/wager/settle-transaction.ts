@@ -1,4 +1,4 @@
-import type { EntityManager } from '@mikro-orm/postgresql';
+import { raw, type EntityManager } from '@mikro-orm/postgresql';
 import { FailureCode } from '../../domain/errors';
 import {
   WagerTransactionPendingReference,
@@ -23,7 +23,8 @@ import {
   type PendingReferencePolicy,
 } from '../../domain/wager-transaction';
 import { enqueueEvent } from '../../infrastructure/outbox/outbox-writer';
-import { persistWalletChanges } from '../../infrastructure/persistence/wallet-sql';
+import { WagerTransaction } from '../../infrastructure/persistence/entities';
+import { persistWalletChanges } from '../../infrastructure/persistence/wallet-repository';
 import { findTransactionByExternal } from './transaction-view';
 
 export interface SettleInput {
@@ -54,21 +55,22 @@ export async function loadReference(
 ): Promise<ReferenceSnapshot | null> {
   const row = await findTransactionByExternal(tx, providerId, referenceExternalId);
   if (!row) return null;
-  const reversals = await tx.execute<{ kind: TransactionKind }[]>(
-    `select kind from wager_transactions where reference_transaction_id = ? and status = 'PROCESSED'`,
-    [row.id],
+  const reversals = await tx.find(
+    WagerTransaction,
+    { referenceTransaction: row.id, status: 'PROCESSED' },
+    { fields: ['kind'] },
   );
   return {
     id: row.id,
-    providerId: row.provider_id,
-    playerId: row.player_id,
-    walletId: row.wallet_id ?? '',
+    providerId: row.providerId,
+    playerId: row.playerId,
+    walletId: row.wallet ?? '',
     currency: row.currency,
-    roundId: row.round_id,
+    roundId: row.roundId ?? null,
     kind: row.kind as TransactionKind,
     status: row.status as TransactionStatus,
     amount: Money.parse(row.amount, row.currency),
-    reversedBy: reversals.map((r) => r.kind),
+    reversedBy: reversals.map((r) => r.kind as TransactionKind),
   };
 }
 
@@ -115,11 +117,10 @@ export async function settleTransaction(
 
   if (retry) {
     assertTransition(s.fromStatus, 'PENDING_REFERENCE');
-    await tx.execute(
-      `update wager_transactions
-          set status = 'PENDING_REFERENCE', retry_count = ?, next_retry_at = ?, updated_at = now()
-        where id = ?`,
-      [retry.retryCount, retry.at, s.transactionId],
+    await tx.nativeUpdate(
+      WagerTransaction,
+      { id: s.transactionId },
+      { status: 'PENDING_REFERENCE', retryCount: retry.retryCount, nextRetryAt: retry.at, updatedAt: raw('now()') as never },
     );
     // Announce the wait once; later reschedules are internal bookkeeping.
     if (s.fromStatus === 'PENDING') {
@@ -139,12 +140,16 @@ export async function settleTransaction(
   const failureCode = decision.type === 'REJECT' ? decision.code : null;
   assertTransition(s.fromStatus, status);
 
-  await tx.execute(
-    `update wager_transactions
-        set status = ?, failure_code = ?, next_retry_at = null,
-            reference_transaction_id = ?, updated_at = now()
-      where id = ?`,
-    [status, failureCode, processed ? (reference?.id ?? null) : null, s.transactionId],
+  await tx.nativeUpdate(
+    WagerTransaction,
+    { id: s.transactionId },
+    {
+      status,
+      failureCode,
+      nextRetryAt: null,
+      referenceTransaction: processed ? (reference?.id ?? null) : null,
+      updatedAt: raw('now()') as never,
+    },
   );
 
   const events: DomainEvent[] = [];

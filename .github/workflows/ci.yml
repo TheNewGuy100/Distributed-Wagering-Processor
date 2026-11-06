@@ -39,6 +39,8 @@ jobs:
           bun run migration:up
           bun run migration:down
           bun run migration:up
+      - name: Schema drift check (entities must match the migrated database)
+        run: bun run migration:check
       - name: Integration tests
         run: bun run test:integration
       - name: Service logs on failure

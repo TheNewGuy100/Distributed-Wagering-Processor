@@ -1,5 +1,6 @@
 import { EntityManager } from '@mikro-orm/postgresql';
 import { Inject, Injectable, type OnModuleInit } from '@nestjs/common';
+import { OutboxEvent, WagerTransaction, Wallet } from '../persistence/entities';
 import { MetricsService } from './metrics.service';
 
 /** Declares every metric (help text) and the gauges that are read from the database at scrape time. */
@@ -28,11 +29,9 @@ export class MetricsBootstrap implements OnModuleInit {
     m.describe('transient_infra_errors_total', 'Transient infrastructure errors surfaced as HTTP 503');
 
     m.gauge('outbox_unpublished_events', 'Committed outbox events not yet published', async () => {
-      const [r] = await this.em.fork().execute<{ c: number }[]>(
-        'select count(*)::int as c from outbox_events where published_at is null',
-      );
-      return [{ value: r?.c ?? 0 }];
+      return [{ value: await this.em.fork().count(OutboxEvent, { publishedAt: null }) }];
     });
+    // Raw on purpose: the age must be measured with the database clock (now()), the clock that stamped created_at.
     m.gauge('outbox_lag_seconds', 'Age of the oldest unpublished outbox event (0 when empty)', async () => {
       const [r] = await this.em.fork().execute<{ age: number }[]>(
         `select coalesce(extract(epoch from (now() - min(created_at))), 0)::float8 as age
@@ -41,16 +40,10 @@ export class MetricsBootstrap implements OnModuleInit {
       return [{ value: Math.round((r?.age ?? 0) * 1000) / 1000 }];
     });
     m.gauge('pending_reference_transactions', 'Transactions currently waiting for their reference', async () => {
-      const [r] = await this.em.fork().execute<{ c: number }[]>(
-        `select count(*)::int as c from wager_transactions where status = 'PENDING_REFERENCE'`,
-      );
-      return [{ value: r?.c ?? 0 }];
+      return [{ value: await this.em.fork().count(WagerTransaction, { status: 'PENDING_REFERENCE' }) }];
     });
     m.gauge('wallets_flagged', 'Wallets flagged by reconciliation', async () => {
-      const [r] = await this.em.fork().execute<{ c: number }[]>(
-        'select count(*)::int as c from wallets where flagged_at is not null',
-      );
-      return [{ value: r?.c ?? 0 }];
+      return [{ value: await this.em.fork().count(Wallet, { flaggedAt: { $ne: null } }) }];
     });
   }
 }

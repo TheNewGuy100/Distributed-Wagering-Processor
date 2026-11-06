@@ -1,5 +1,5 @@
 import { SendMessageBatchCommand } from '@aws-sdk/client-sqs';
-import { EntityManager } from '@mikro-orm/postgresql';
+import { EntityManager, LockMode, raw } from '@mikro-orm/postgresql';
 import {
   Inject,
   Injectable,
@@ -8,6 +8,7 @@ import {
   type OnApplicationBootstrap,
 } from '@nestjs/common';
 import { MetricsService } from '../observability/metrics.service';
+import { OutboxEvent } from '../persistence/entities';
 import { SqsQueues } from '../sqs/sqs-queues.service';
 import { OUTBOX_CONFIG, type OutboxConfig } from './outbox.config';
 
@@ -15,14 +16,6 @@ import { OUTBOX_CONFIG, type OutboxConfig } from './outbox.config';
 @Injectable()
 export class OutboxHooks {
   afterSend?: (eventIds: string[]) => void | Promise<void>;
-}
-
-interface OutboxRow {
-  seq: string;
-  id: string;
-  aggregate_id: string;
-  event_type: string;
-  payload: unknown;
 }
 
 /**
@@ -86,18 +79,22 @@ export class OutboxPublisher implements OnApplicationBootstrap, BeforeApplicatio
   async publishOnce(): Promise<number> {
     const stats = { claimed: 0, sent: 0, failed: 0 };
     await this.em.fork().transactional(async (tx) => {
-      const rows = await tx.execute<OutboxRow[]>(
-        `select o.seq, o.id, o.aggregate_id, o.event_type, o.payload
-           from outbox_events o
-          where o.published_at is null
-            and not exists (
-              select 1 from outbox_events p
-               where p.aggregate_id = o.aggregate_id and p.published_at is null and p.seq < o.seq)
-          order by o.seq
-          limit ?
-          for update of o skip locked`,
-        [this.config.batchSize],
-      );
+      // Only the head of each aggregate is claimable (no earlier unpublished event of the same aggregate), and
+      // rows another publisher already holds are skipped. The correlated NOT EXISTS is the one raw fragment: the
+      // query builder has no vocabulary for a self-correlated anti-join.
+      const rows = await tx
+        .createQueryBuilder(OutboxEvent, 'o')
+        .select('*')
+        .where({ publishedAt: null })
+        .andWhere(
+          raw(
+            'not exists (select 1 from outbox_events p where p.aggregate_id = o.aggregate_id and p.published_at is null and p.seq < o.seq)',
+          ),
+        )
+        .orderBy({ seq: 'asc' })
+        .limit(this.config.batchSize)
+        .setLockMode(LockMode.PESSIMISTIC_PARTIAL_WRITE)
+        .getResultList();
       if (rows.length === 0) return;
       stats.claimed = rows.length;
 
@@ -107,9 +104,9 @@ export class OutboxPublisher implements OnApplicationBootstrap, BeforeApplicatio
           Entries: rows.map((r, i) => ({
             Id: String(i),
             MessageBody: JSON.stringify(r.payload),
-            MessageGroupId: r.aggregate_id,
+            MessageGroupId: r.aggregateId,
             MessageDeduplicationId: r.id,
-            MessageAttributes: { eventType: { DataType: 'String', StringValue: r.event_type } },
+            MessageAttributes: { eventType: { DataType: 'String', StringValue: r.eventType } },
           })),
         }),
       );
@@ -118,16 +115,17 @@ export class OutboxPublisher implements OnApplicationBootstrap, BeforeApplicatio
       stats.sent = sentIds.length;
       stats.failed = (res.Failed ?? []).length;
       if (sentIds.length > 0) {
-        await tx.execute(
-          `update outbox_events set published_at = now(), attempts = attempts + 1
-            where id in (${sentIds.map(() => '?').join(',')})`,
-          sentIds,
+        await tx.nativeUpdate(
+          OutboxEvent,
+          { id: { $in: sentIds } },
+          { publishedAt: raw('now()') as never, attempts: raw('attempts + 1') as never },
         );
       }
       for (const f of res.Failed ?? []) {
-        await tx.execute(
-          'update outbox_events set attempts = attempts + 1, last_error = ? where id = ?',
-          [`${f.Code ?? 'ERROR'}: ${f.Message ?? ''}`.slice(0, 500), rows[Number(f.Id)]!.id],
+        await tx.nativeUpdate(
+          OutboxEvent,
+          { id: rows[Number(f.Id)]!.id },
+          { attempts: raw('attempts + 1') as never, lastError: `${f.Code ?? 'ERROR'}: ${f.Message ?? ''}`.slice(0, 500) },
         );
       }
 
