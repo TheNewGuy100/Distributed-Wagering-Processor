@@ -12,7 +12,7 @@ const supported = process.platform !== 'win32';
 const port = 3917;
 const suffix = Date.now().toString(36);
 
-async function waitReady(timeoutMs: number): Promise<void> {
+async function waitReady(timeoutMs: number, output: () => string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -22,14 +22,17 @@ async function waitReady(timeoutMs: number): Promise<void> {
     }
     await Bun.sleep(200);
   }
-  throw new Error('the application did not become ready');
+  throw new Error(`the application did not become ready within ${timeoutMs} ms. Its output:
+${output().slice(-3000)}`);
 }
 
 describe.skipIf(!supported)('process lifecycle (SIGTERM)', () => {
   test('stops gracefully and promptly even with the consumer and outbox running and a long grace period', async () => {
     const proc = Bun.spawn([process.execPath, 'test/integration/fixtures/pid1-like.ts'], {
       env: {
-        ...process.env,
+        // The test runner's environment can carry settings left by other test files (AUTH_MODE=jwt from the start-up
+        // validation test, for one), which must not leak into this independent process.
+        ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('AUTH_'))),
         PORT: String(port),
         SQS_QUEUE_NAME: `ps-wagers-${suffix}.fifo`,
         SQS_DLQ_NAME: `ps-dlq-${suffix}.fifo`,
@@ -44,11 +47,20 @@ describe.skipIf(!supported)('process lifecycle (SIGTERM)', () => {
         LOG_LEVEL: 'log',
       },
       stdout: 'pipe',
-      stderr: 'ignore',
+      stderr: 'pipe',
     });
 
+    // Drain both streams continuously: nothing is lost for the assertions below, a chatty child can never block on a
+    // full pipe, and a failure can show what the application printed.
+    const chunks: string[] = [];
+    const drain = async (stream: ReadableStream<Uint8Array>) => {
+      const decoder = new TextDecoder();
+      for await (const chunk of stream) chunks.push(decoder.decode(chunk));
+    };
+    const drained = Promise.all([drain(proc.stdout), drain(proc.stderr)]);
+
     try {
-      await waitReady(30_000);
+      await waitReady(30_000, () => chunks.join(''));
       const started = performance.now();
       proc.kill('SIGTERM');
       const code = await Promise.race([
@@ -63,8 +75,9 @@ describe.skipIf(!supported)('process lifecycle (SIGTERM)', () => {
       expect(elapsedMs).toBeLessThan(8_000); // far below the 30 s grace periods
 
       // And the hooks really ran (a bare kill would also exit quickly): both workers logged a drained shutdown.
-      const stdout = await new Response(proc.stdout).text();
-      const logs = stdout
+      await drained;
+      const logs = chunks
+        .join('')
         .split('\n')
         .filter((l) => l.startsWith('{'))
         .map((l) => JSON.parse(l) as { event?: string; component?: string; result?: string });

@@ -92,3 +92,22 @@ jobs:
       - name: Stop services
         if: always()
         run: docker compose down -v
+
+  docker-stack-keycloak:
+    name: Real identity provider (Keycloak) in front of the API
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE_FILES: -f docker-compose.yml -f docker-compose.auth.yml
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image and start the stack with Keycloak
+        run: docker compose $COMPOSE_FILES up -d --build --wait
+      - name: Tokens issued by Keycloak are validated; roles and provider scoping are enforced
+        run: bash docker/keycloak/smoke.sh
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose $COMPOSE_FILES logs --no-color
+      - name: Stop services
+        if: always()
+        run: docker compose $COMPOSE_FILES down -v

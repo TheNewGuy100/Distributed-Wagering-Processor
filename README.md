@@ -157,5 +157,37 @@ distribute it is granted. See [LICENSE](LICENSE).
 
 ## Authentication
 
-Not scored and not enabled by default. There is an explicit extension point (`Authenticator`, a global guard and a
-`@Public()` marker for probes/metrics); see ARCHITECTURE.md for how to plug in Keycloak or Zitadel.
+Off by default (`AUTH_MODE=none`), so the API can be tried without an identity provider. With `AUTH_MODE=jwt` the API
+validates bearer tokens issued by an external OpenID Connect provider (Keycloak, Zitadel, ...) and enforces **roles**
+(`wager:submit`, `wager:read`, `wallet:read`, `wallet:write`, `wallet:reconcile`, `admin`) and **provider scoping** (a
+token with a `provider_id` claim can only act for that provider). Health probes and `/metrics` stay public. Details and
+the security checks: ARCHITECTURE.md, section 10.
+
+| Variable | Default | |
+|---|---|---|
+| `AUTH_MODE` | `none` | `none` or `jwt` |
+| `AUTH_ISSUER` | | Expected `iss`, e.g. `https://keycloak.example.com/realms/wagering` (required for `jwt`; https only) |
+| `AUTH_AUDIENCE` | | Expected `aud` / this API's client id (required for `jwt`) |
+| `AUTH_JWKS_URI` | discovered | Explicit JWKS URL; otherwise `<issuer>/.well-known/openid-configuration` |
+| `AUTH_PROVIDER_CLAIM` | `provider_id` | Claim that scopes a token to one provider |
+| `AUTH_ROLES_CLAIM` | | Extra claim (dot path) to read roles from, besides the Keycloak / Zitadel locations |
+| `AUTH_CLIENT_ID` | audience | Client whose Keycloak client roles count |
+| `AUTH_ALGORITHMS` | `RS256,PS256,ES256,EdDSA` | Asymmetric algorithms only |
+| `AUTH_CLOCK_TOLERANCE_SECONDS` / `AUTH_JWKS_COOLDOWN_MS` / `AUTH_JWKS_TIMEOUT_MS` | `5` / `30000` / `3000` | |
+| `AUTH_ALLOW_INSECURE_ISSUER` | `false` | Allow an `http://` issuer / JWKS URL (local development only) |
+
+### Try it with a real Keycloak
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.auth.yml up -d --build --wait
+bash docker/keycloak/smoke.sh        # tokens, roles, provider scoping, tampering, public probes
+
+# by hand: a token for game provider "acme" (client-credentials grant), then a request with it
+TOKEN=$(curl -s -d grant_type=client_credentials -d client_id=provider-acme -d client_secret=acme-dev-secret \
+  http://localhost:8081/realms/wagering/protocol/openid-connect/token | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
+curl -s -H "authorization: Bearer $TOKEN" localhost:3000/providers/acme/wagering/transactions/bet-1
+```
+
+The demo realm (`docker/keycloak/wagering-realm.json`) has clients `provider-acme`, `provider-globex` (roles
+`wager:submit`, `wager:read`, scoped to their provider) and `ops-admin` (`admin`). Its secrets are public sample values:
+**development only**. `docker compose -f docker-compose.yml -f docker-compose.auth.yml down -v` removes it.

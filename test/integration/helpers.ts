@@ -45,13 +45,28 @@ export async function bootApp(env: Record<string, string> = {}): Promise<TestApp
   process.env.OUTBOX_ENABLED = 'false';
   process.env.PENDING_WORKER_ENABLED = 'false';
   process.env.ORM_QUERY_LOG = 'false';
+  // Authentication settings must not leak from one test file's app to the next one's.
+  for (const k of Object.keys(process.env)) if (k.startsWith('AUTH_')) delete process.env[k];
   for (const [k, v] of Object.entries(env)) process.env[k] = v;
   const orm = await MikroORM.init(config);
   await orm.migrator.up(); // idempotent
   // Expected error/warn logs (simulated crashes, deliberate corruption) must not look like failures in
   // the test report. Tests that care assert on logs explicitly; set TEST_LOG_LEVEL=error to see them all.
-  const app = await NestFactory.create(AppModule, { logger: new JsonLogger(process.env.TEST_LOG_LEVEL ?? 'silent') });
-  await app.listen(0);
+  let app;
+  try {
+    app = await NestFactory.create(AppModule, {
+      logger: new JsonLogger(process.env.TEST_LOG_LEVEL ?? 'silent'),
+      abortOnError: false, // a failing start-up must reject (testable), not kill the test runner
+    });
+    await app.listen(0);
+  } catch (e) {
+    await orm.close(); // a rejected start-up must not leave a connection pool behind
+    throw e;
+  } finally {
+    // The settings were read while the app was created; leaving them in process.env would leak them into whatever
+    // runs next in this process (another app, or a child process that inherits the environment).
+    for (const k of Object.keys(process.env)) if (k.startsWith('AUTH_')) delete process.env[k];
+  }
   const url = await app.getUrl();
   return {
     url: url.replace('[::1]', 'localhost'),

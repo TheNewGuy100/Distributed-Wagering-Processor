@@ -18,7 +18,7 @@ describe('authentication extension point', () => {
     const auth = t.app.get<Authenticator>(AUTHENTICATOR);
     const original = auth.authenticate;
     auth.authenticate = async (req) =>
-      req.header('authorization') === 'Bearer good' ? { subject: 'svc', providerId: 'prov-a', roles: [] } : null;
+      req.header('authorization') === 'Bearer good' ? { subject: 'svc', providerId: 'prov-a', roles: ['wallet:read'] } : null;
     try {
       expect((await api(t, 'GET', `/wallets/${w.walletId}`)).status).toBe(401);
       expect((await api(t, 'POST', '/wagering/transactions', {})).status).toBe(401);

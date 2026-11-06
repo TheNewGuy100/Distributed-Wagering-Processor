@@ -1,7 +1,15 @@
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { Module, type MiddlewareConsumer, type NestModule } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
-import { AUTHENTICATOR, AuthGuard, NoopAuthenticator } from './interfaces/http/auth/auth.port';
+import {
+  AUTHENTICATOR,
+  AuthGuard,
+  NoopAuthenticator,
+  ProviderAccessPolicy,
+  type Authenticator,
+} from './interfaces/http/auth/auth.port';
+import { AUTH_CONFIG, loadAuthConfig, type AuthConfig } from './interfaces/http/auth/auth.config';
+import { JwtAuthenticator } from './interfaces/http/auth/jwt-authenticator';
 import { MikroOrmModule } from '@mikro-orm/nestjs';
 import { buildOrmConfig } from './infrastructure/persistence/mikro-orm.config';
 import { ProcessWagerTransaction } from './application/wager/process-wager-transaction';
@@ -53,7 +61,15 @@ import { SqsConsumer } from './interfaces/sqs/sqs-consumer.service';
     SqsConsumer,
     WalletService,
     { provide: APP_FILTER, useClass: HttpErrorFilter },
-    { provide: AUTHENTICATOR, useClass: NoopAuthenticator },
+    // Fails at start-up on a misconfiguration (AUTH_MODE=jwt without issuer/audience, plain-http issuer, bad algorithms).
+    { provide: AUTH_CONFIG, useFactory: () => loadAuthConfig() },
+    {
+      provide: AUTHENTICATOR,
+      inject: [AUTH_CONFIG, MetricsService],
+      useFactory: (config: AuthConfig, metrics: MetricsService): Authenticator =>
+        config.mode === 'jwt' ? new JwtAuthenticator(config, metrics) : new NoopAuthenticator(),
+    },
+    ProviderAccessPolicy,
     { provide: APP_GUARD, useClass: AuthGuard },
   ],
 })

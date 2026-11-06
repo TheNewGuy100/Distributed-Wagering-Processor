@@ -43,7 +43,15 @@ export class HttpErrorFilter implements ExceptionFilter {
     }
     if (exception instanceof HttpException) {
       const status = exception.getStatus();
-      res.status(status).json({ error: { code: status === 400 ? 'VALIDATION_ERROR' : 'HTTP_ERROR', message: exception.message } });
+      const code =
+        status === 400 ? 'VALIDATION_ERROR'
+        : status === 401 ? 'UNAUTHENTICATED'
+        : status === 403 ? 'FORBIDDEN'
+        : status === 503 ? 'SERVICE_UNAVAILABLE'
+        : 'HTTP_ERROR';
+      if (status === 401) res.setHeader('WWW-Authenticate', 'Bearer'); // RFC 6750: tell the client how to authenticate
+      if (status === 503) res.setHeader('Retry-After', '1');
+      res.status(status).json({ error: { code, message: exception.message } });
       return;
     }
     if (isTransientInfraError(exception)) {

@@ -1,0 +1,119 @@
+{
+  "realm": "wagering",
+  "enabled": true,
+  "sslRequired": "none",
+  "accessTokenLifespan": 300,
+  "displayName": "Wagering (DEVELOPMENT ONLY demo realm: the client secrets in this file are public sample values)",
+  "roles": {
+    "client": {
+      "wagering-api": [
+        { "name": "wager:submit", "description": "Submit wager transactions" },
+        { "name": "wager:read", "description": "Read wager transactions" },
+        { "name": "wallet:read", "description": "Read wallets and ledgers" },
+        { "name": "wallet:write", "description": "Create wallets" },
+        { "name": "wallet:reconcile", "description": "Run reconciliation" },
+        { "name": "admin", "description": "Everything" }
+      ]
+    }
+  },
+  "clients": [
+    {
+      "clientId": "wagering-api",
+      "name": "Distributed Wagering Processor (resource server)",
+      "enabled": true,
+      "bearerOnly": true
+    },
+    {
+      "clientId": "provider-acme",
+      "name": "Game provider ACME",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "acme-dev-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "audience-wagering-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": { "included.client.audience": "wagering-api", "id.token.claim": "false", "access.token.claim": "true" }
+        },
+        {
+          "name": "provider-id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "config": { "claim.name": "provider_id", "claim.value": "acme", "jsonType.label": "String", "id.token.claim": "false", "access.token.claim": "true" }
+        }
+      ]
+    },
+    {
+      "clientId": "provider-globex",
+      "name": "Game provider Globex",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "globex-dev-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "audience-wagering-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": { "included.client.audience": "wagering-api", "id.token.claim": "false", "access.token.claim": "true" }
+        },
+        {
+          "name": "provider-id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "config": { "claim.name": "provider_id", "claim.value": "globex", "jsonType.label": "String", "id.token.claim": "false", "access.token.claim": "true" }
+        }
+      ]
+    },
+    {
+      "clientId": "ops-admin",
+      "name": "Operations (not provider-scoped)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "ops-dev-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "audience-wagering-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": { "included.client.audience": "wagering-api", "id.token.claim": "false", "access.token.claim": "true" }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "service-account-provider-acme",
+      "enabled": true,
+      "serviceAccountClientId": "provider-acme",
+      "clientRoles": { "wagering-api": ["wager:submit", "wager:read"] }
+    },
+    {
+      "username": "service-account-provider-globex",
+      "enabled": true,
+      "serviceAccountClientId": "provider-globex",
+      "clientRoles": { "wagering-api": ["wager:submit", "wager:read"] }
+    },
+    {
+      "username": "service-account-ops-admin",
+      "enabled": true,
+      "serviceAccountClientId": "ops-admin",
+      "clientRoles": { "wagering-api": ["admin"] }
+    }
+  ]
+}

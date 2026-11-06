@@ -218,19 +218,54 @@ audit decision. Corruption can only affect `wallets.balance` or `version`, becau
   lag and size, waiting reversals and flagged wallets.
 * **Health**: `/health/live` touches nothing; `/health/ready` requires PostgreSQL and SQS.
 
-## 10. Authentication (decision and extension point)
+## 10. Authentication and authorization
 
-Authentication is not implemented, deliberately: the service must not own user tables, and the challenge does not
-score it. The extension point is real, not a comment: a global `AuthGuard` calls an `Authenticator` port and attaches
-a `Principal` (`subject`, optional `providerId`, `roles`) to the request; health and metrics are `@Public()`. The
-default `NoopAuthenticator` lets everything through. A test replaces the authenticator and verifies 401s on protected
-routes while probes stay open.
+The service owns no user table: identity, credentials and key management stay at an external OpenID Connect provider
+(Keycloak, Zitadel, any OIDC IdP). It is **off by default** (`AUTH_MODE=none`, every caller acts as an administrator, so
+the challenge can be evaluated without an IdP) and **on with `AUTH_MODE=jwt`**.
 
-To enable it: add a `JwtAuthenticator` that validates the bearer token against the identity provider's JWKS
-(Keycloak or Zitadel: signature, issuer, audience, expiry), maps claims to `Principal`, and bind it to `AUTHENTICATOR`.
-Then reject requests whose `providerId` differs from `principal.providerId` (the check belongs next to
-`parseWagerCommand`). SQS messages are a trusted internal channel, but provider identity in them still goes through
-the same domain validation.
+### Authentication (`JwtAuthenticator`, `jose`)
+
+A global `AuthGuard` calls an `Authenticator` port and attaches a `Principal` (`subject`, optional `providerId`, `roles`).
+`JwtAuthenticator` validates `Authorization: Bearer <jwt>`:
+
+* **Signature** against the public key found by `kid` in the IdP's JWKS, fetched lazily over HTTPS (OIDC discovery, or
+  `AUTH_JWKS_URI` when the issuer URL clients see differs from the internal back-channel URL).
+* **`iss`, `aud`, `exp` and `sub`** are required and checked (5 s clock tolerance); `nbf` is honoured.
+* **Algorithms are a closed, asymmetric list** (`RS*`, `PS*`, `ES*`, `EdDSA`). `none` and HMAC are refused, which closes
+  the classic algorithm-confusion attack (an HS256 token "signed" with the public key as the secret). Tests forge both.
+* **Fails closed and tells the truth.** A bad token is `401` (`WWW-Authenticate: Bearer`, code `UNAUTHENTICATED`); an
+  identity provider that cannot be reached is `503` (`Retry-After`), not "your token is wrong". Keys already cached keep
+  validating through an outage.
+* **No hammering of the IdP.** Unknown `kid`s trigger a JWKS refetch (that is how key rotation works) but at most once per
+  cooldown (`AUTH_JWKS_COOLDOWN_MS`), so a flood of bad tokens costs one IdP request, not thousands. Tested.
+* **Start-up validation**: `AUTH_MODE=jwt` without issuer or audience, an `http://` issuer or JWKS URL (unless
+  `AUTH_ALLOW_INSECURE_ISSUER=true` for local development) or a non-asymmetric algorithm refuses to boot.
+* An OIDC discovery document whose `issuer` differs from `AUTH_ISSUER` is rejected (mix-up defence).
+* Tokens and claims are never logged; the log context carries the `subject` for the audit trail.
+
+### Authorization
+
+* **Roles**, read from where IdPs put them: `roles`, Keycloak `realm_access.roles` and `resource_access.<client>.roles`
+  (only for this API's client: another client's `admin` does not leak in), Zitadel project roles, or a configured claim.
+  `wager:submit` (POST transactions), `wager:read`, `wallet:read`, `wallet:write` (create wallets), `wallet:reconcile`;
+  `admin` implies all. Missing role: `403` (`FORBIDDEN`).
+* **Provider scoping.** A token carrying a `provider_id` claim (configurable) may only act for that provider: submitting for
+  another provider or reading another provider's path is `403`, and another provider's transaction fetched by id is `404`
+  so its existence is not disclosed. A token without the claim (operations) is unscoped. The check happens after payload
+  validation and before anything is booked; a forbidden attempt leaves no trace in the ledger (tested).
+* Health probes and `/metrics` are `@Public()`. SQS messages are a trusted internal channel (the brief's premise), but the
+  provider inside them still goes through the same domain validation.
+
+### Verified against a real identity provider
+
+`docker-compose.auth.yml` adds Keycloak with an imported demo realm (two providers, `acme` and `globex`, and an operations
+client, all client-credentials). `docker/keycloak/smoke.sh` requests real tokens and checks authentication, roles and
+scoping through the container; CI runs it. The integration tests use an in-process fake IdP (OIDC discovery + JWKS with
+generated keys) so they can also exercise rotation, an IdP outage and forged tokens deterministically.
+
+Limits: only machine-to-machine bearer tokens are exercised (client credentials); there is no login UI, refresh or token
+revocation list (short-lived access tokens are the mitigation), and rate limiting is left to the platform.
 
 ## 11. Testing strategy
 
