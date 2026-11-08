@@ -161,7 +161,8 @@ See [.env.example](.env.example) for the basics. Tuning knobs, all optional:
 | `SQS_MAX_RECEIVE_COUNT` | `5` | Deliveries before a failing message goes to the DLQ |
 | `SQS_RETRY_BASE_SECONDS` / `SQS_RETRY_MAX_SECONDS` | `2` / `300` | Exponential redelivery backoff |
 | `SQS_VISIBILITY_TIMEOUT_SECONDS` | `30` | Must be identical on every instance (queue attribute) |
-| `OUTBOX_ENABLED` / `OUTBOX_PUBLISHERS` | `true` / `2` | Outbox publisher loops per instance |
+| `OUTBOX_ENABLED` / `OUTBOX_PUBLISHERS` | `true` / `2` | Outbox publisher loops per instance (the publisher has its own DB pool, one connection per loop) |
+| `DB_POOL_MAX` | `10` | Connections of the request pool per instance |
 | `OUTBOX_RETRY_BASE_MS` / `OUTBOX_RETRY_MAX_MS` / `OUTBOX_MAX_ATTEMPTS` | `1000` / `60000` / `20` | Backoff for an event the broker refuses, and how many refusals make it `DEAD` |
 | `PENDING_WORKER_ENABLED` | `true` | Retry worker for reversals that arrived before their reference |
 | `PENDING_MAX_RETRIES` / `PENDING_BASE_DELAY_MS` / `PENDING_MAX_DELAY_MS` | `8` / `1000` / `300000` | Backoff before `REFERENCE_NOT_FOUND` |
@@ -201,15 +202,20 @@ large (the same code varied by about 50% between runs). The load generator, both
 machine, so read it as relative, not as capacity. The A/B history (raw SQL vs ORM vs optimized ORM) is in
 ARCHITECTURE.md (limitations).
 
-Reference run on GitHub Actions (`ubuntu-latest`, 4 vCPU AMD EPYC 7763, 17 GB, PostgreSQL 17, Bun 1.4.4, 2 instances,
-30 s, concurrency 64, 50 wallets, [run 42409524531](https://github.com/TheNewGuy100/Distributed-Wagering-Processor/actions/runs/42409524531)):
-10,078 requests, **333 req/s, p50 166 ms, p95 402 ms, p99 560 ms, max 1,037 ms, 0 % errors**, 2,106 wallet lock
-conflicts (waits, not failures), 499 duplicates absorbed (the 5 % replays), 0 diverging wallets. The outbox fell
-behind under load (**max lag 18.6 s, 21.8 s to drain** 18,126 events): the API sustains more than a single publisher
-loop publishes per second, and the two hot wallets serialize their own events. An earlier run, before the publisher
-sent a wallet's pending events in one batch ([run 42265737037](https://github.com/TheNewGuy100/Distributed-Wagering-Processor/actions/runs/42265737037)),
-showed 358 req/s, max lag 14 s and 28.5 s to drain: batching shortened the drain, not the peak lag; the difference in
-throughput and latency between the two runs is within what a shared runner varies. Same shared-machine caveat as above.
+Reference run on GitHub Actions (`ubuntu-latest`, 4 vCPU AMD EPYC, 17 GB, PostgreSQL 17, Bun 1.4.4, 2 instances,
+30 s, concurrency 64, 50 wallets, [run 42486091984](https://github.com/TheNewGuy100/Distributed-Wagering-Processor/actions/runs/42486091984)):
+**323 req/s, p50 193 ms, p99 643 ms, 0 % errors**, 0 diverging wallets, outbox **max lag 5.0 s, 7.9 s to drain** 17,511
+events (a second run: 292 req/s, lag 6.5 s, drain 9.2 s). Same shared-machine caveat as above: the load generator, both
+instances and the databases share 4 vCPUs, and both instances run in the load generator's own process.
+
+How the outbox lag got there (same workload, same runner type): 14 s peak / 28.5 s drain at first; 18.6–20.1 s / 21.8–27.8 s
+after the publisher sent a wallet's events in one batch (that helped the drain, not the peak); **5.0–6.5 s / 7.9–9.2 s** after
+two fixes. (1) The follower lookup loaded *every* pending event of the wallets the publisher held and then kept 10, so a
+cycle got slower as a hot wallet's backlog grew (now bounded; `scripts/bench-outbox.ts`: 251 to 560 events/s with one
+loop, 398 to 765 with two). (2) The publisher shared the request connection pool and queued behind requests that were
+waiting on a wallet lock, so almost nothing was published until the traffic stopped (now it has its own pool). The price is
+a few percent of request throughput and latency (about 10 % lower req/s, p50 +20–40 ms), because the publisher now works
+while the requests do.
 
 ## License
 
