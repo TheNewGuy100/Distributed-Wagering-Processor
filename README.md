@@ -199,11 +199,14 @@ machine, so read it as relative, not as capacity. The A/B history (raw SQL vs OR
 ARCHITECTURE.md (limitations).
 
 Reference run on GitHub Actions (`ubuntu-latest`, 4 vCPU AMD EPYC 7763, 17 GB, PostgreSQL 17, Bun 1.4.4, 2 instances,
-30 s, concurrency 64, 50 wallets, [run 42265737037](https://github.com/TheNewGuy100/Distributed-Wagering-Processor/actions/runs/42265737037)):
-10,794 requests, **358 req/s, p50 155 ms, p95 376 ms, p99 535 ms, max 967 ms, 0 % errors**, 2,153 wallet lock
-conflicts (waits, not failures), 570 duplicates absorbed (the 5 % replays), 0 diverging wallets. The outbox fell
-behind under load (**max lag 14 s, 28.5 s to drain** 19,459 events): the API sustains more than a single publisher
-loop publishes per second, and the two hot wallets serialize their own events. Same shared-machine caveat as above.
+30 s, concurrency 64, 50 wallets, [run 42409524531](https://github.com/TheNewGuy100/Distributed-Wagering-Processor/actions/runs/42409524531)):
+10,078 requests, **333 req/s, p50 166 ms, p95 402 ms, p99 560 ms, max 1,037 ms, 0 % errors**, 2,106 wallet lock
+conflicts (waits, not failures), 499 duplicates absorbed (the 5 % replays), 0 diverging wallets. The outbox fell
+behind under load (**max lag 18.6 s, 21.8 s to drain** 18,126 events): the API sustains more than a single publisher
+loop publishes per second, and the two hot wallets serialize their own events. An earlier run, before the publisher
+sent a wallet's pending events in one batch ([run 42265737037](https://github.com/TheNewGuy100/Distributed-Wagering-Processor/actions/runs/42265737037)),
+showed 358 req/s, max lag 14 s and 28.5 s to drain: batching shortened the drain, not the peak lag; the difference in
+throughput and latency between the two runs is within what a shared runner varies. Same shared-machine caveat as above.
 
 ## License
 

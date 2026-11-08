@@ -387,8 +387,9 @@ name in the catalog **and** by behaviour, every migration reversible, no entity/
   wallets (a jackpot or house wallet), which should be split into several sub-wallets by the caller. The honest way to
   go faster inside one wallet would be to batch several requests per lock acquisition; not done, for the complexity it
   would add to the idempotency and ordering guarantees.
-* **Outbox throughput under sustained load**: the GitHub Actions load test (358 req/s) produced events faster than the
-  publishers sent them: lag peaked at 14 s and the backlog took 28.5 s to drain. Events of one wallet are published in
+* **Outbox throughput under sustained load**: the GitHub Actions load test (333 req/s) produced events faster than the
+  publishers sent them: lag peaked at 18.6 s and the backlog took 21.8 s to drain (28.5 s, with a 14 s peak, before the
+  publisher sent a wallet's pending events in one batch: batching helped the drain, not the peak). Events of one wallet are published in
   order, so hot wallets are the slowest to drain. More publisher instances help across wallets, not within one.
 * **Outbox head-of-line blocking**: an event the broker refuses holds back the later events of the same wallet while
   it backs off (that is what keeps the order). After `OUTBOX_MAX_ATTEMPTS` it goes `DEAD` and the wallet moves on, so
