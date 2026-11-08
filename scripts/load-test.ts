@@ -1,9 +1,13 @@
 /**
  * Load test: `bun run test:load`
  *
- * Boots N application instances in this process (sharing the PostgreSQL and SQS from docker compose),
- * drives them over real HTTP with a realistic mix, then verifies the financial invariant on every wallet.
+ * Boots N application instances (sharing the PostgreSQL and SQS from docker compose), drives them over real HTTP
+ * with a realistic mix, then verifies the financial invariant on every wallet.
+ * By default each instance is its OWN process (`bun src/main.ts`), like the compose services: the load generator then
+ * does not share an event loop with the application. LOAD_MODE=inprocess boots them inside this process instead (the
+ * mode earlier measurements in the docs were taken with).
  * Knobs (env): LOAD_DURATION_SECONDS=15 LOAD_CONCURRENCY=64 LOAD_WALLETS=50 LOAD_INSTANCES=2 LOAD_HOT_SHARE=0.2
+ *              LOAD_MODE=processes|inprocess  LOAD_BASE_PORT=3100
  */
 import 'reflect-metadata';
 import { MikroORM } from '@mikro-orm/postgresql';
@@ -19,6 +23,8 @@ const CONCURRENCY = num('LOAD_CONCURRENCY', 64);
 const WALLETS = num('LOAD_WALLETS', 50);
 const INSTANCES = num('LOAD_INSTANCES', 2);
 const HOT_SHARE = num('LOAD_HOT_SHARE', 0.2); // share of traffic aimed at the two hottest wallets
+const MODE = process.env.LOAD_MODE === 'inprocess' ? 'inprocess' : 'processes';
+const BASE_PORT = num('LOAD_BASE_PORT', 3100);
 
 const suffix = Date.now().toString(36);
 Object.assign(process.env, {
@@ -30,11 +36,11 @@ Object.assign(process.env, {
   PENDING_WORKER_ENABLED: 'true',
 });
 
-const { AppModule } = await import('../src/app.module');
 const { default: ormConfig } = await import('../src/infrastructure/persistence/mikro-orm.config');
 
 interface Instance {
-  app: INestApplication;
+  /** Stops the instance (gracefully: the publisher gets to finish its cycle). */
+  stop(): Promise<void>;
   url: string;
 }
 
@@ -42,10 +48,60 @@ const orm = await MikroORM.init(ormConfig);
 await orm.migrator.up();
 
 const instances: Instance[] = [];
-for (let i = 0; i < INSTANCES; i++) {
-  const app = await NestFactory.create(AppModule, { logger: ['error'] });
+
+async function startInProcess(): Promise<Instance> {
+  const { AppModule } = await import('../src/app.module');
+  const app: INestApplication = await NestFactory.create(AppModule, { logger: ['error'] });
   await app.listen(0);
-  instances.push({ app, url: (await app.getUrl()).replace('[::1]', 'localhost') });
+  return { url: (await app.getUrl()).replace('[::1]', 'localhost'), stop: () => app.close() };
+}
+
+async function startProcess(port: number): Promise<Instance> {
+  const child = Bun.spawn([process.execPath, 'src/main.ts'], {
+    env: { ...process.env, PORT: String(port), LOG_LEVEL: 'error' },
+    stdout: 'inherit',
+    stderr: 'inherit',
+  });
+  process.on('exit', () => child.kill()); // never leave an instance behind, whatever way the script ends
+  const url = `http://localhost:${port}`;
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    if (child.exitCode !== null) throw new Error(`instance on port ${port} exited with ${child.exitCode}`);
+    try {
+      if ((await fetch(`${url}/health/ready`)).ok) break;
+    } catch {
+      /* not listening yet */
+    }
+    if (Date.now() > deadline) {
+      child.kill();
+      throw new Error(`instance on port ${port} did not become ready`);
+    }
+    await Bun.sleep(200);
+  }
+  return {
+    url,
+    stop: async () => {
+      // Graceful where signals exist (src/main.ts enables shutdown hooks); on Windows kill() terminates the process.
+      if (process.platform === 'win32') child.kill();
+      else child.kill('SIGTERM');
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const forced = new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          child.kill('SIGKILL');
+          resolve();
+        }, 15_000);
+      });
+      await Promise.race([child.exited, forced]);
+      clearTimeout(timer);
+    },
+  };
+}
+
+try {
+  for (let i = 0; i < INSTANCES; i++) instances.push(MODE === 'processes' ? await startProcess(BASE_PORT + i) : await startInProcess());
+} catch (e) {
+  for (const inst of instances) await inst.stop();
+  throw e;
 }
 let rr = 0;
 const nextUrl = () => instances[rr++ % instances.length]!.url;
@@ -187,6 +243,7 @@ const report = {
     memoryGB: Math.round(os.totalmem() / 1e9),
     postgres: pg?.v.split(' on ')[0],
     instances: INSTANCES,
+    instanceMode: MODE === 'processes' ? 'one OS process per instance' : 'all instances inside the load generator process',
     note: 'Instances, load generator and (in CI) the databases share one machine; treat numbers as relative, not absolute.',
   },
   methodology: {
@@ -239,7 +296,7 @@ if (process.env.GITHUB_STEP_SUMMARY) {
   );
 }
 
-for (const inst of instances) await inst.app.close();
+for (const inst of instances) await inst.stop();
 await orm.close();
 
 // The run fails if money is wrong or the service is unhealthy, whatever the speed.

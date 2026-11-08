@@ -190,7 +190,7 @@ bun run test:load                                   # defaults: 15s, 64 concurre
 LOAD_DURATION_SECONDS=60 LOAD_CONCURRENCY=128 bun run test:load
 ```
 
-It boots the instances in-process, drives real HTTP traffic (60% BET, 25% WIN, 10% LOSS, 5% exact replays, 20% of the
+It starts each instance as its own OS process (`LOAD_MODE=inprocess` boots them inside the load generator instead), drives real HTTP traffic (60% BET, 25% WIN, 10% LOSS, 5% exact replays, 20% of the
 traffic aimed at two hot wallets), waits for the outbox to drain, reconciles every wallet and fails if any money is
 wrong. The report (also in `load-test-report.json`) lists environment, methodology, throughput, p50/p95/p99, error
 rate, wallet lock conflicts and outbox lag. In GitHub Actions it is the manual **Load test** workflow.
