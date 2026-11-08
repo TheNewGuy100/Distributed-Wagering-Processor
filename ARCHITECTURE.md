@@ -399,12 +399,14 @@ name in the catalog **and** by behaviour, every migration reversible, no entity/
   wallets (a jackpot or house wallet), which should be split into several sub-wallets by the caller. The honest way to
   go faster inside one wallet would be to batch several requests per lock acquisition; not done, for the complexity it
   would add to the idempotency and ordering guarantees.
-* **Outbox throughput under sustained load**: on GitHub Actions at ~300 req/s (about 600 events/s produced) the lag
-  peaks at 5–6.5 s and the backlog drains 8–9 s after the load stops (it was 14–20 s and 22–28 s before two fixes: the
+* **Outbox throughput under sustained load**: on GitHub Actions at ~330 req/s (about 600 events/s produced), with each
+  instance in its own OS process, the lag peaks at 7–10 s and the backlog drains 13–17 s after the load stops (with both
+  instances in the load generator's process it was 5–6.5 s and 8–9 s; before two fixes, 14–20 s and 22–28 s). The fixes: the
   follower lookup is bounded to one batch per aggregate, so a cycle no longer scales with a hot wallet's backlog, and the
-  publisher has its own connection pool instead of queueing behind requests that wait on a wallet lock). Events of one
-  wallet are published in order, so hot wallets are the slowest to drain. More publisher instances help across wallets,
-  not within one. The dedicated pool costs a few percent of request throughput, since publishing now happens during the load.
+  publisher has its own connection pool instead of queueing behind requests that wait on a wallet lock. What is left is CPU:
+  the publisher shares a process, and the runner, with the request path. Events of one wallet are published in order, so hot
+  wallets are the slowest to drain. More publisher instances help across wallets, not within one. Running the publisher as a
+  separate deployment (`OUTBOX_ENABLED=false` on the API instances) is the way to remove the competition; it is not done here.
 * **Outbox head-of-line blocking**: an event the broker refuses holds back the later events of the same wallet while
   it backs off (that is what keeps the order). After `OUTBOX_MAX_ATTEMPTS` it goes `DEAD` and the wallet moves on, so
   consumers must be able to tolerate a gap in `walletVersion` (the example consumer in `tools/events-consumer` does: a skipped

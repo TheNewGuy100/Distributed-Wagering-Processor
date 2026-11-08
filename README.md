@@ -202,20 +202,24 @@ large (the same code varied by about 50% between runs). The load generator, both
 machine, so read it as relative, not as capacity. The A/B history (raw SQL vs ORM vs optimized ORM) is in
 ARCHITECTURE.md (limitations).
 
-Reference run on GitHub Actions (`ubuntu-latest`, 4 vCPU AMD EPYC, 17 GB, PostgreSQL 17, Bun 1.4.4, 2 instances,
-30 s, concurrency 64, 50 wallets, [run 42486091984](https://github.com/TheNewGuy100/Distributed-Wagering-Processor/actions/runs/42486091984)):
-**323 req/s, p50 193 ms, p99 643 ms, 0 % errors**, 0 diverging wallets, outbox **max lag 5.0 s, 7.9 s to drain** 17,511
-events (a second run: 292 req/s, lag 6.5 s, drain 9.2 s). Same shared-machine caveat as above: the load generator, both
-instances and the databases share 4 vCPUs, and both instances run in the load generator's own process.
+Reference run on GitHub Actions (`ubuntu-latest`, 4 vCPU AMD EPYC, 17 GB, PostgreSQL 17, Bun 1.4.4, 2 instances, **each its own
+OS process**, 30 s, concurrency 64, 50 wallets, [run 42488061097](https://github.com/TheNewGuy100/Distributed-Wagering-Processor/actions/runs/42488061097)):
+9,942 requests, **329 req/s, p50 180 ms, p95 407 ms, p99 634 ms, 0 % errors**, 2,114 wallet lock conflicts (waits, not
+failures), 510 duplicates absorbed (the 5 % replays), 0 diverging wallets, outbox **max lag 7.3 s, 12.6 s to drain** 17,915
+events. A second run gave 328 req/s, p99 604 ms, lag 10.2 s, drain 16.6 s. Same shared-machine caveat as above: the load
+generator, both instances, PostgreSQL and the emulated SQS share 4 vCPUs.
 
-How the outbox lag got there (same workload, same runner type): 14 s peak / 28.5 s drain at first; 18.6–20.1 s / 21.8–27.8 s
-after the publisher sent a wallet's events in one batch (that helped the drain, not the peak); **5.0–6.5 s / 7.9–9.2 s** after
-two fixes. (1) The follower lookup loaded *every* pending event of the wallets the publisher held and then kept 10, so a
-cycle got slower as a hot wallet's backlog grew (now bounded; `scripts/bench-outbox.ts`: 251 to 560 events/s with one
-loop, 398 to 765 with two). (2) The publisher shared the request connection pool and queued behind requests that were
-waiting on a wallet lock, so almost nothing was published until the traffic stopped (now it has its own pool). The price is
-a few percent of request throughput and latency (about 10 % lower req/s, p50 +20–40 ms), because the publisher now works
-while the requests do.
+How the outbox lag got there. The first runs booted both instances *inside the load generator's process* (`LOAD_MODE=inprocess`
+still does): 14 s peak / 28.5 s drain; 18.6–20.1 s / 21.8–27.8 s after the publisher sent a wallet's events in one batch (that
+helped the drain, not the peak); **5.0–6.5 s / 7.9–9.2 s** after two fixes. (1) The follower lookup loaded *every* pending
+event of the wallets the publisher held and then kept 10, so a cycle got slower as a hot wallet's backlog grew (now bounded;
+`scripts/bench-outbox.ts`: 251 to 560 events/s with one loop, 398 to 765 with two). (2) The publisher shared the request
+connection pool and queued behind requests that were waiting on a wallet lock, so almost nothing was published until the
+traffic stopped (now it has its own pool). The price is a few percent of request throughput and latency, because the
+publisher now works while the requests do. With one OS process per instance, which is how the compose services run, the same
+build shows **7.3–10.2 s / 12.6–16.6 s**: the in-process figures were flattering, because two instances sharing one event
+loop throttled the request side, and the publisher competes with the requests of its own process for CPU. The honest summary
+is "a few seconds of lag at ~330 req/s on 4 shared vCPUs, draining within about 15 s of the load stopping".
 
 ## License
 
