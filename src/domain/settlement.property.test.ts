@@ -141,6 +141,7 @@ function checkInvariants(wallet: Wallet, opening: Money, ledger: LedgerEntryDraf
     if (t.kind === 'BET') expected -= t.amount.minor;
     else if (t.kind === 'WIN') expected += t.amount.minor;
     else if (t.kind === 'REFUND' || t.kind === 'ROLLBACK') {
+      // the inverse of what the reference did: a BET debited, a WIN and a REFUND credited
       expected += t.reference!.kind === 'BET' ? t.amount.minor : -t.amount.minor;
     }
   }
@@ -151,10 +152,10 @@ function checkInvariants(wallet: Wallet, opening: Money, ledger: LedgerEntryDraf
   for (const t of processed) if (t.reference) reversed.set(t.reference.id, (reversed.get(t.reference.id) ?? 0) + 1);
   for (const n of reversed.values()) expect(n).toBe(1);
 
-  // 5. a reversal only ever points at a processed BET/WIN of the same amount
+  // 5. a reversal only ever points at a processed transaction of the kind it may reverse, with the same amount
   for (const t of processed) {
     if (!t.reference) continue;
-    expect(['BET', 'WIN']).toContain(t.reference.kind);
+    expect(t.reference.kind === 'BET' || (t.kind === 'ROLLBACK' && ['WIN', 'REFUND'].includes(t.reference.kind))).toBe(true);
     expect(t.reference.status).toBe('PROCESSED');
     expect(t.amount.minor).toBe(t.reference.amount.minor);
   }

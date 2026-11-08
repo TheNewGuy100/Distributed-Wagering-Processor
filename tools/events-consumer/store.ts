@@ -96,7 +96,9 @@ export class EventStore {
     let lateFill = false;
     const walletVersion = parsed.data.walletVersion;
     if (parsed.eventType === 'WalletBalanceChanged' && typeof walletVersion === 'number') {
-      const last = this.lastWalletVersion.get(parsed.aggregateId) ?? 0;
+      // A wallet starts at version 1, but an empty wallet emits no event for it (its first event is version 2), and a
+      // consumer may join late: the first version seen for a wallet is the baseline, gaps are counted from there on.
+      const last = this.lastWalletVersion.get(parsed.aggregateId) ?? walletVersion - 1;
       const missing = this.missingVersions.get(parsed.aggregateId);
       if (walletVersion > last) {
         if (walletVersion > last + 1) {

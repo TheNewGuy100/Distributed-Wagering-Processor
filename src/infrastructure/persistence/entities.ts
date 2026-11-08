@@ -20,7 +20,7 @@ export const Wallet = defineEntity({
     playerId: p.text().fieldName('player_id'),
     currency: p.string().columnType('char(3)'),
     balance: p.decimal('string').columnType('numeric(18,2)').default('0'),
-    version: p.bigint('number').default(0),
+    version: p.bigint('number').default(1),
     createdAt: p.datetime().fieldName('created_at').columnType('timestamptz').defaultRaw('now()'),
     /** Set by reconciliation when stored and recomputed balances diverge; never auto-cleared. */
     flaggedAt: p.datetime().fieldName('flagged_at').columnType('timestamptz').nullable(),

@@ -20,6 +20,26 @@ describe('wallets', () => {
     expect(dup.body.error.code).toBe('WALLET_ALREADY_EXISTS');
   });
 
+  test('a wallet is at version 1 from creation, funded or not; only later balance changes bump it', async () => {
+    const funded = await createWallet(t, '100.00');
+    const empty = await createWallet(t);
+    expect((await api(t, 'GET', `/wallets/${funded.walletId}`)).body.version).toBe(1);
+    expect((await api(t, 'GET', `/wallets/${empty.walletId}`)).body.version).toBe(1);
+
+    await wager(t, funded, { amount: '10.00' }); // balance changes
+    await wager(t, funded, { kind: 'LOSS', amount: '10.00' }); // does not
+    await wager(t, empty, { amount: '10.00' }); // rejected: nothing changes
+    await wager(t, empty, { kind: 'WIN', amount: '10.00' }); // balance changes
+    expect((await api(t, 'GET', `/wallets/${funded.walletId}`)).body.version).toBe(2);
+    expect((await api(t, 'GET', `/wallets/${empty.walletId}`)).body.version).toBe(2);
+
+    // the reconciliation knows the numbering too
+    for (const w of [funded, empty]) {
+      const r = await api(t, 'POST', `/wallets/${w.walletId}/reconciliation`);
+      expect(r.body).toMatchObject({ consistent: true, storedVersion: 2 });
+    }
+  });
+
   test('same player may hold one wallet per currency; no opening credit means no ledger entry', async () => {
     const playerId = uid('multi');
     expect((await api(t, 'POST', '/wallets', { playerId, initialBalance: { amount: '0.00', currency: 'BRL' } })).status).toBe(201);
@@ -193,6 +213,40 @@ describe('reversals', () => {
     expect(again.body.failureCode).toBe('ALREADY_REVERSED');
     expect(rollback.body.failureCode).toBe('ALREADY_REVERSED');
     expect(await expectLedgerConsistent(t, w.walletId)).toEqual({ balance: '20.00', entries: 3 });
+  });
+
+  test('a REFUND only reverses a BET: a REFUND pointing at a WIN is a rejection, and changes nothing', async () => {
+    const w = await createWallet(t, '10.00');
+    const winExt = uid('win');
+    await wager(t, w, { kind: 'WIN', externalTransactionId: winExt, amount: '5.00' });
+    const refund = await wager(t, w, { kind: 'REFUND', amount: '5.00', referenceExternalTransactionId: winExt });
+    expect(refund.status).toBe(422);
+    expect(refund.body.failureCode).toBe('REFERENCE_NOT_REVERSIBLE');
+    expect(await expectLedgerConsistent(t, w.walletId)).toEqual({ balance: '15.00', entries: 2 });
+  });
+
+  test('a ROLLBACK may reverse a REFUND, once, and not when it would overdraw', async () => {
+    const w = await createWallet(t, '20.00');
+    const betExt = uid('bet');
+    const refundExt = uid('refund');
+    await wager(t, w, { externalTransactionId: betExt, amount: '8.00' });
+    await wager(t, w, { kind: 'REFUND', externalTransactionId: refundExt, amount: '8.00', referenceExternalTransactionId: betExt });
+    const rollback = await wager(t, w, { kind: 'ROLLBACK', amount: '8.00', referenceExternalTransactionId: refundExt });
+    expect(rollback.status).toBe(201);
+    expect(rollback.body.balance.amount).toBe('12.00'); // the returned stake is taken out again
+    const twice = await wager(t, w, { kind: 'ROLLBACK', amount: '8.00', referenceExternalTransactionId: refundExt });
+    expect(twice.body.failureCode).toBe('ALREADY_REVERSED');
+    expect(await expectLedgerConsistent(t, w.walletId)).toEqual({ balance: '12.00', entries: 4 });
+
+    // not when the returned stake was already spent
+    const poor = await createWallet(t, '5.00');
+    const bet2 = uid('bet');
+    const ref2 = uid('refund');
+    await wager(t, poor, { externalTransactionId: bet2, amount: '5.00' });
+    await wager(t, poor, { kind: 'REFUND', externalTransactionId: ref2, amount: '5.00', referenceExternalTransactionId: bet2 });
+    await wager(t, poor, { amount: '5.00' }); // spends the returned stake again
+    const overdraw = await wager(t, poor, { kind: 'ROLLBACK', amount: '5.00', referenceExternalTransactionId: ref2 });
+    expect(overdraw.body.failureCode).toBe('REVERSAL_WOULD_OVERDRAW');
   });
 
   test('reversal arriving before its reference waits in PENDING_REFERENCE with a retry schedule', async () => {

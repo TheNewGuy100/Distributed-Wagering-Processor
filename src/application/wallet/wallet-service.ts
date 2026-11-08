@@ -2,7 +2,7 @@ import { EntityManager } from '@mikro-orm/postgresql';
 import { Inject, Injectable } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import { WagerTransactionProcessed, WalletBalanceChanged } from '../../domain/events';
-import { Wallet } from '../../domain/wallet';
+import { INITIAL_VERSION, Wallet } from '../../domain/wallet';
 import { enqueueEvent } from '../../infrastructure/outbox/outbox-writer';
 import {
   LedgerEntry,
@@ -102,8 +102,8 @@ export class WalletService {
           wallet: walletId,
         });
         const wallet = Wallet.open(walletId, playerId, currency);
-        const entry = wallet.credit(txId, opening);
-        await persistWalletChanges(tx, wallet, 0, [entry]);
+        const entry = wallet.openingCredit(txId, opening);
+        await persistWalletChanges(tx, wallet, INITIAL_VERSION, [entry]);
         await enqueueEvent(
           tx,
           new WagerTransactionProcessed(txId, {

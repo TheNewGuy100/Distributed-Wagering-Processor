@@ -8,6 +8,9 @@ import { Money } from './money';
 
 export type LedgerDirection = 'CREDIT' | 'DEBIT';
 
+/** A wallet is at version 1 from the moment it exists. */
+export const INITIAL_VERSION = 1;
+
 /** A ledger entry produced by the aggregate, to be appended by the repository. */
 export interface LedgerEntryDraft {
   readonly transactionId: string;
@@ -26,7 +29,8 @@ export interface WalletSnapshot {
 
 /**
  * Aggregate root. Every balance change yields exactly one ledger entry, the balance
- * never goes negative, and `version` only increments when the balance changes.
+ * never goes negative, and `version` starts at 1 when the wallet is created and only increments when the balance
+ * changes afterwards (the opening credit is part of creation, so it does not increment it).
  * Concurrency is handled by the persistence layer (row lock); the aggregate is single-threaded.
  */
 export class Wallet {
@@ -46,7 +50,7 @@ export class Wallet {
   }
 
   static open(id: string, playerId: string, currency: string): Wallet {
-    return new Wallet(id, playerId, Money.zero(currency), 0);
+    return new Wallet(id, playerId, Money.zero(currency), INITIAL_VERSION);
   }
 
   static rehydrate(s: WalletSnapshot): Wallet {
@@ -65,6 +69,20 @@ export class Wallet {
   /** Entries produced since load/open; the repository persists then clears them. */
   get pendingEntries(): readonly LedgerEntryDraft[] {
     return this._entries;
+  }
+
+  /**
+   * The credit that opens a funded wallet. It is part of creating the wallet, so the wallet is at version 1 with or
+   * without it; only an untouched, empty, freshly opened wallet can take it.
+   */
+  openingCredit(transactionId: string, amount: Money): LedgerEntryDraft {
+    if (this._version !== INITIAL_VERSION || !this._balance.isZero() || this._entries.length > 0) {
+      throw new InvariantViolationError('the opening credit can only be applied to a new, empty wallet');
+    }
+    this.guard(transactionId, amount);
+    const entry = this.record(transactionId, 'CREDIT', amount, this._balance.add(amount));
+    this._version = INITIAL_VERSION;
+    return entry;
   }
 
   canDebit(amount: Money): boolean {

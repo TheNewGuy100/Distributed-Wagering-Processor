@@ -7,6 +7,12 @@ export type TransactionStatus = 'PENDING' | 'PENDING_REFERENCE' | 'PROCESSED' | 
 
 export const REVERSAL_KINDS: readonly TransactionKind[] = ['REFUND', 'ROLLBACK'];
 
+/** What each reversal may point at: a REFUND only returns a stake; a ROLLBACK may undo a BET, a WIN or a REFUND. */
+export const REVERSIBLE_KINDS: Record<'REFUND' | 'ROLLBACK', readonly TransactionKind[]> = {
+  REFUND: ['BET'],
+  ROLLBACK: ['BET', 'WIN', 'REFUND'],
+};
+
 export interface TransactionInput {
   kind: TransactionKind;
   providerId: string;
@@ -87,13 +93,16 @@ function decideReversal(input: TransactionInput, wallet: Wallet, ref: ReferenceS
   if (ref.roundId !== input.roundId) return reject(FailureCode.ReferenceMismatch, 'round');
   if (!ref.amount.equals(input.amount)) return reject(FailureCode.ReferenceMismatch, 'amount');
 
-  // Only money-moving BET/WIN can be reversed. LOSS moved nothing; reversals and OPENING are final.
-  if (ref.kind !== 'BET' && ref.kind !== 'WIN') return reject(FailureCode.ReferenceNotReversible);
+  // LOSS moved nothing, a ROLLBACK is final and OPENING is internal; a REFUND only reverses a BET.
+  if (!REVERSIBLE_KINDS[input.kind as 'REFUND' | 'ROLLBACK'].includes(ref.kind)) {
+    return reject(FailureCode.ReferenceNotReversible);
+  }
 
   // Stricter than "once per operation type": a REFUND after a ROLLBACK (or vice versa) would
   // return the same money twice, so any prior reversal blocks the next one.
   if (ref.reversedBy.length > 0) return reject(FailureCode.AlreadyReversed);
 
+  // The inverse of the reference: a BET debited, so its reversal credits; a WIN or a REFUND credited, so theirs debit.
   if (ref.kind === 'BET') return { type: 'APPLY', direction: 'CREDIT', amount: ref.amount };
   return wallet.canDebit(ref.amount)
     ? { type: 'APPLY', direction: 'DEBIT', amount: ref.amount }

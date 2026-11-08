@@ -119,10 +119,33 @@ describe('REFUND / ROLLBACK', () => {
       code: 'REVERSAL_WOULD_OVERDRAW',
     });
   });
-  test('LOSS, reversals and OPENING are not reversible', () => {
-    for (const kind of ['LOSS', 'REFUND', 'ROLLBACK', 'OPENING'] as const) {
-      expect(decide(reversal(), walletWith('0.00'), ref({ kind }))).toMatchObject({ code: 'REFERENCE_NOT_REVERSIBLE' });
+  test('a REFUND only reverses a BET', () => {
+    for (const kind of ['WIN', 'LOSS', 'REFUND', 'ROLLBACK', 'OPENING'] as const) {
+      expect(decide(reversal('REFUND'), walletWith('100.00'), ref({ kind }))).toMatchObject({ code: 'REFERENCE_NOT_REVERSIBLE' });
     }
+  });
+  test('a ROLLBACK reverses a BET, a WIN or a REFUND, and nothing else', () => {
+    for (const kind of ['LOSS', 'ROLLBACK', 'OPENING'] as const) {
+      expect(decide(reversal('ROLLBACK'), walletWith('100.00'), ref({ kind }))).toMatchObject({ code: 'REFERENCE_NOT_REVERSIBLE' });
+    }
+    expect(decide(reversal('ROLLBACK'), walletWith('0.00'), ref({ kind: 'BET' }))).toMatchObject({ type: 'APPLY', direction: 'CREDIT' });
+    expect(decide(reversal('ROLLBACK'), walletWith('10.00'), ref({ kind: 'WIN' }))).toMatchObject({ type: 'APPLY', direction: 'DEBIT' });
+  });
+  test('rolling back a REFUND takes the returned stake out again, or is rejected as an overdraw', () => {
+    expect(decide(reversal('ROLLBACK'), walletWith('10.00'), ref({ kind: 'REFUND' }))).toEqual({
+      type: 'APPLY',
+      direction: 'DEBIT',
+      amount: brl('10.00'),
+    });
+    expect(decide(reversal('ROLLBACK'), walletWith('3.00'), ref({ kind: 'REFUND' }))).toEqual({
+      type: 'REJECT',
+      code: 'REVERSAL_WOULD_OVERDRAW',
+    });
+  });
+  test('a REFUND that was rolled back cannot be rolled back again', () => {
+    expect(decide(reversal('ROLLBACK'), walletWith('50.00'), ref({ kind: 'REFUND', reversedBy: ['ROLLBACK'] }))).toMatchObject({
+      code: 'ALREADY_REVERSED',
+    });
   });
   test('second reversal is blocked, same or different type', () => {
     expect(decide(reversal('REFUND'), walletWith('0.00'), ref({ reversedBy: ['REFUND'] }))).toMatchObject({ code: 'ALREADY_REVERSED' });

@@ -53,6 +53,7 @@ export class ReconciliationService {
         calculated: string;
         version: string | number;
         entries: number;
+        opening_entries: number;
         last_balance_after: string | null;
         flagged_at: string | null;
       }[]
@@ -60,8 +61,10 @@ export class ReconciliationService {
       `select w.currency, w.balance as stored, w.version, w.flagged_at,
               coalesce(sum(case l.direction when 'CREDIT' then l.amount else -l.amount end), 0)::numeric(18,2) as calculated,
               count(l.id)::int as entries,
+              count(l.id) filter (where t.kind = 'OPENING')::int as opening_entries,
               (array_agg(l.balance_after order by l.seq desc))[1] as last_balance_after
          from wallets w left join ledger_entries l on l.wallet_id = w.id
+         left join wager_transactions t on t.id = l.transaction_id
         where w.id = ?
         group by w.id`,
       [walletId],
@@ -73,8 +76,10 @@ export class ReconciliationService {
     if (r.stored !== r.calculated) {
       differences.push(`stored balance ${r.stored} != ledger-derived balance ${r.calculated}`);
     }
-    if (Number(r.version) !== r.entries) {
-      differences.push(`wallet version ${r.version} != ledger entries ${r.entries}`);
+    // version = 1 at creation + one per balance change since; the opening credit is part of creation.
+    const expectedVersion = 1 + r.entries - r.opening_entries;
+    if (Number(r.version) !== expectedVersion) {
+      differences.push(`wallet version ${r.version} != expected ${expectedVersion} (1 + ${r.entries - r.opening_entries} ledger entries since creation)`);
     }
     if (r.last_balance_after !== null && r.last_balance_after !== r.stored) {
       differences.push(`last ledger balance_after ${r.last_balance_after} != stored balance ${r.stored}`);

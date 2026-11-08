@@ -45,6 +45,15 @@ describe('EventStore', () => {
     expect(s.stats.unique).toBe(0);
   });
 
+  test('a wallet opened empty has no event for version 1: its first event (version 2) is not a gap', () => {
+    const s = new EventStore();
+    const first = s.ingest('1', balanceChanged('empty', 2));
+    expect(first.gap).toBeUndefined();
+    expect(first.outOfOrder).toBeUndefined();
+    expect(s.stats.openGaps).toBe(0);
+    expect(s.ingest('2', balanceChanged('empty', 4)).gap).toEqual({ from: 3, to: 3 }); // but a later skip still is
+  });
+
   test('wallet versions must increase per wallet; a repeat or a step back is flagged, a gap is fine', () => {
     const s = new EventStore();
     expect(s.ingest('1', balanceChanged('w1', 1)).outOfOrder).toBeUndefined();

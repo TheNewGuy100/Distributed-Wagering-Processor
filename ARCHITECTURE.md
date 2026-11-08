@@ -147,16 +147,34 @@ The API follows the challenge's skeleton where it fits (`Money.from({amount, cur
 constructed at all. That makes "the balance went negative" unrepresentable in the domain, on top of the database `CHECK`.
 Direction lives in the ledger (`CREDIT`/`DEBIT`) and amounts stay positive.
 
-`LOSS` and rejected transactions produce no ledger entry. `version` increments only when the balance changes, and
-therefore equals the number of ledger entries; reconciliation checks that too.
+`LOSS` and rejected transactions produce no ledger entry. A wallet is at `version` **1 from the moment it is created**
+(funded or empty; the opening credit is part of creation and does not bump it), and the version increments only when the
+balance changes afterwards. So `version = 1 + ledger entries since creation`; reconciliation checks exactly that. The
+first `WalletBalanceChanged` of a funded wallet carries version 1, of an empty one version 2 (a consumer therefore
+starts counting from the first version it sees; see `tools/events-consumer`).
 
-### Reversals are stricter than the minimum
+### What a reversal may point at, and how strict "once" is
 
-The brief allows one reversal per operation type. The service allows **one reversal per transaction, of any type**:
-a `REFUND` followed by a `ROLLBACK` of the same bet would return the stake twice. This is enforced in the domain
-(`ALREADY_REVERSED`) and by the partial unique index as the last line of defence. Only `BET` and `WIN` are reversible
-(`LOSS` moved nothing; reversals and `OPENING` are final). Reversing a `WIN` that has already been spent is rejected as
-`REVERSAL_WOULD_OVERDRAW`, distinct from `INSUFFICIENT_FUNDS`.
+As in the brief: a `REFUND` only reverses a `BET` (it returns the stake); a `ROLLBACK` reverses a `BET`, a `WIN` or a
+`REFUND` and does the inverse of its reference (a `BET` debited, so its rollback credits; a `WIN` or a `REFUND` credited,
+so theirs debit). Anything else (`LOSS` moved nothing, a `ROLLBACK` is final, `OPENING` is internal, a `REFUND` of a `WIN`)
+is `REFERENCE_NOT_REVERSIBLE`. Undoing something that was already spent is rejected as `REVERSAL_WOULD_OVERDRAW`,
+distinct from `INSUFFICIENT_FUNDS`.
+
+The brief allows one reversal per operation type. The service allows **one reversal per transaction, of any type**
+(stricter on purpose): a `REFUND` followed by a `ROLLBACK` of the same bet would return the stake twice. This is enforced in
+the domain (`ALREADY_REVERSED`) and by the partial unique index as the last line of defence. It is per *reference*: a
+`REFUND` is itself a transaction, so rolling it back is a different reference and is allowed once.
+
+### Where the service departs from the brief on purpose
+
+* `FAILED` is not terminal here (the brief calls it terminal): a resend of the very same request reopens it. See the
+  `FAILED` paragraph in section 7 for the reasoning; `PROCESSED` and `REJECTED` are terminal as specified.
+* One reversal per transaction of any type, instead of per type (above).
+* `Money` has no `negate()`/`isNegative()`: a negative amount is unrepresentable, which removes a class of bugs; direction
+  lives in the ledger.
+* `WagerTransaction` and the ledger entry are persisted rows with their rules in pure domain functions
+  (`decide`, `planSettlement`, the status machine) and in database constraints, not rich classes with a private constructor.
 
 ## 4. The transactional core
 
