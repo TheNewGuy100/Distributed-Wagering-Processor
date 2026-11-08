@@ -11,7 +11,7 @@ describe('Money', () => {
     expect(Money.fromMinor(123456n, 'BRL').toString()).toBe('1234.56');
   });
 
-  test.each(['10', '10.5', '10.505', '-1.00', '+1.00', '1e2', '01.00', ' 1.00', '', '1,00', 'abc', '.50'])(
+  test.each(['10', '10.5', '10.505', '-1.00', '+1.00', '1e2', '1E2', '01.00', ' 1.00', '', '1,00', 'abc', '.50', 'NaN', 'Infinity', '-Infinity', '1.00 ', '0x10'])(
     'rejects malformed string %p',
     (v) => {
       expect(() => Money.parse(v, 'BRL')).toThrow(InvalidMoneyError);

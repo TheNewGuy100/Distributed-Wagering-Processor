@@ -204,6 +204,30 @@ round, game, reference). Same key and hash returns the stored result with `idemp
 the stored outcome); same key or external id with a different hash is `409 IDEMPOTENCY_CONFLICT`. All state is in
 PostgreSQL: there is no in-memory idempotency anywhere, and a restart or another instance changes nothing.
 
+### Failure codes: what the provider should do
+
+Every rejection carries a stable, machine-readable `failureCode` (a business verdict, HTTP `422`, status `REJECTED`, final).
+The provider decides from the code alone:
+
+| `failureCode` | When | Provider should |
+|---|---|---|
+| `INSUFFICIENT_FUNDS` | a `BET` for more than the balance | give up on this bet (tell the player); a *new* bet with another id after a deposit is fine |
+| `REVERSAL_WOULD_OVERDRAW` | undoing a `WIN` or a `REFUND` whose money was already spent | give up, or settle the debt outside this service; distinct from `INSUFFICIENT_FUNDS` on purpose |
+| `INVALID_AMOUNT` | a zero amount on a `BET`, `WIN` or `OPENING` | correct the payload and send it with a new id |
+| `CURRENCY_MISMATCH` | the money is not in the wallet's currency | correct the payload and send it with a new id |
+| `WALLET_PLAYER_MISMATCH` | the wallet belongs to another player (domain guard; over HTTP/SQS this is caught earlier as a `400`) | correct the payload |
+| `REFERENCE_NOT_FOUND` | a reversal whose reference never arrived within the retry budget | resend the reversal after the original has been delivered, with a new id |
+| `REFERENCE_NOT_PROCESSED` | the reference exists but was rejected or failed | give up: there is nothing to reverse |
+| `REFERENCE_MISMATCH` | the reference belongs to another provider, player, wallet, currency or round, or has another amount (`detail` says which) | correct the payload |
+| `REFERENCE_NOT_REVERSIBLE` | a `REFUND` of anything but a `BET`; a `ROLLBACK` of a `LOSS`, a `ROLLBACK` or an `OPENING` | correct the payload / give up |
+| `ALREADY_REVERSED` | the reference was already reversed (by any reversal) | give up: the first reversal stands |
+
+Everything else is *not* a verdict and never becomes `REJECTED`: `400 VALIDATION_ERROR` (fix the payload),
+`409 IDEMPOTENCY_CONFLICT` (same key or external id with another payload: a bug in the provider, do not retry),
+`404 WALLET_NOT_FOUND` / `TRANSACTION_NOT_FOUND`, `409 WALLET_ALREADY_EXISTS`, and `503` with `Retry-After` for a transient
+failure (resend with the *same* key; it is safe by design). `FAILED` with `PROCESSING_FAILED` is the queue's way of saying
+"we gave up for technical reasons, nothing was applied": resend the same request to reopen it.
+
 ## 5. Out-of-order reversals
 
 A `REFUND`/`ROLLBACK` whose reference does not exist yet (or is not final) is stored as `PENDING_REFERENCE` with
@@ -385,6 +409,12 @@ the amount check fails it on the first seeds). `races-and-idempotency.test.ts` r
 external id with 20 different payloads, one id under 20 keys, one key for 20 ids (exactly one transaction each time), a
 reversal fired together with its own reference (8 rounds), and a seeded concurrent mix of bets, wins, losses, duplicates and
 reversals over 4 wallets whose final balances are recomputed from the stored statuses.
+
+`brief-scenarios.test.ts` pins the scenarios the brief names, worded as the brief words them: two simultaneous bets of 80.00 on a
+100.00 wallet **on two instances** (one `PROCESSED`, one `REJECTED` for insufficient funds, 20.00 left, exactly one debit,
+twenty retries change nothing), and the all-or-nothing transaction under an injected failure (a trigger makes the last write,
+the outbox event, fail: the balance, ledger, transaction row and inbox row are all unchanged, and the same request or
+message then applies exactly once). `OPENING` is also shown to be unsubmittable through the queue.
 
 Database-level guarantees have their own tests: `schema-guarantees.test.ts` (each trigger, partial index and `CHECK` by
 name in the catalog **and** by behaviour, every migration reversible, no entity/schema drift) and `lock-order.test.ts`
