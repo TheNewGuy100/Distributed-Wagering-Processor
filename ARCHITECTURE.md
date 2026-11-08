@@ -356,6 +356,18 @@ concurrency scenarios from the brief with real parallelism. MiniStack's SQS beha
 deduplication, redelivery after the visibility timeout, redrive to a DLQ) is pinned by a contract test, and the image
 version is pinned.
 
+The settlement decision itself is pure domain code (`planSettlement` in `domain/wager-transaction.ts`: apply, reject, or
+wait for the reference with a bounded retry budget, plus the status-transition check); `settleTransaction` only loads
+the reference and persists what the domain decided. That is what makes it testable without a database:
+`settlement.property.test.ts` settles 300 seeded random sequences of 120 operations (bets, wins, losses, reversals with
+wrong amounts, unknown references, exhausted retries) and, after every step, checks the balance against the ledger entry
+by entry, against an independent model that only reads final statuses, that nothing is reversed twice, and that a reversal
+only ever points at a processed BET/WIN of the same amount (verified by mutation: dropping the "already reversed" rule or
+the amount check fails it on the first seeds). `races-and-idempotency.test.ts` runs the same idea against PostgreSQL: one
+external id with 20 different payloads, one id under 20 keys, one key for 20 ids (exactly one transaction each time), a
+reversal fired together with its own reference (8 rounds), and a seeded concurrent mix of bets, wins, losses, duplicates and
+reversals over 4 wallets whose final balances are recomputed from the stored statuses.
+
 Database-level guarantees have their own tests: `schema-guarantees.test.ts` (each trigger, partial index and `CHECK` by
 name in the catalog **and** by behaviour, every migration reversible, no entity/schema drift) and `lock-order.test.ts`
 (the SQL the ORM sends, asserting the wallet `FOR UPDATE` comes first; verified by mutation to fail when the order changes).

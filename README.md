@@ -177,7 +177,10 @@ every scenario is **stored balance == balance rebuilt from the ledger**.
 
 Highlights: 50 identical parallel bets debit once; 50 parallel bets on a 30.00 wallet process exactly 30; three
 instances on one queue; a worker killed after commit and before ack; two outbox publishers; a publisher killed after
-sending and before commit; reversal before reference; graceful shutdown mid-stream; restart with a backlog.
+sending and before commit; reversal before reference; graceful shutdown mid-stream; restart with a backlog; a reversal fired together with its own
+reference; one external id with 20 different payloads or 20 keys; a seeded random concurrent workload whose balances are
+recomputed from the stored statuses. The business rules are also checked as properties over 300 seeded random sequences
+(`src/domain/settlement.property.test.ts`).
 
 ## Load test
 

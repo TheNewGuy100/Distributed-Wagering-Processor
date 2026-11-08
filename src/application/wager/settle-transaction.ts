@@ -1,5 +1,4 @@
 import type { EntityManager } from '@mikro-orm/postgresql';
-import { FailureCode } from '../../domain/errors';
 import {
   WagerTransactionPendingReference,
   WagerTransactionProcessed,
@@ -11,17 +10,11 @@ import { Money } from '../../domain/money';
 import type { Wallet } from '../../domain/wallet';
 import {
   applyDecision,
-  decide,
-  type Decision,
   type ReferenceSnapshot,
   type TransactionKind,
   type TransactionStatus,
 } from '../../domain/wager-rules';
-import {
-  assertTransition,
-  planPendingReferenceRetry,
-  type PendingReferencePolicy,
-} from '../../domain/wager-transaction';
+import { planSettlement, type PendingReferencePolicy } from '../../domain/wager-transaction';
 import { enqueueEvents } from '../../infrastructure/outbox/outbox-writer';
 import { WagerTransaction } from '../../infrastructure/persistence/entities';
 import { persistWalletChanges } from '../../infrastructure/persistence/wallet-repository';
@@ -100,24 +93,8 @@ export async function settleTransaction(
   const reference =
     s.referenceExternalId === null ? null : await loadReference(tx, s.providerId, s.referenceExternalId);
 
-  let decision: Decision = decide(s, wallet, reference);
-  let retry: { retryCount: number; at: Date } | null = null;
-
-  if (decision.type === 'PENDING_REFERENCE') {
-    const plan = planPendingReferenceRetry(s.retryCount, new Date(), policy);
-    if (plan.type === 'RETRY') {
-      retry = { retryCount: plan.retryCount, at: plan.at };
-    } else {
-      decision = {
-        type: 'REJECT',
-        code: reference === null ? FailureCode.ReferenceNotFound : FailureCode.ReferenceNotProcessed,
-        detail: 'reference did not resolve within the retry limit',
-      };
-    }
-  }
-
-  // A reversal inherits the game of the transaction it reverses, so per-game reports do not undercount.
-  const gameId = s.gameId ?? reference?.gameId ?? null;
+  const plan = planSettlement(s, wallet, reference, updatedAt, policy);
+  const gameId = plan.gameId;
   const base = {
     transactionId: s.transactionId,
     providerId: s.providerId,
@@ -129,43 +106,38 @@ export async function settleTransaction(
     money: { amount: s.amount.toString(), currency: s.currency },
   };
 
-  if (retry) {
-    assertTransition(s.fromStatus, 'PENDING_REFERENCE');
+  if (plan.type === 'WAIT') {
     await tx.nativeUpdate(
       WagerTransaction,
       { id: s.transactionId },
       {
-        status: 'PENDING_REFERENCE',
-        retryCount: retry.retryCount,
-        nextRetryAt: retry.at,
+        status: plan.status,
+        retryCount: plan.retryCount,
+        nextRetryAt: plan.retryAt,
         balanceAfter: wallet.balance.toString(),
         updatedAt,
       },
     );
-    // Announce the wait once; later reschedules are internal bookkeeping.
-    if (s.fromStatus === 'PENDING') {
+    if (plan.announce) {
       await enqueueEvents(tx, [
         new WagerTransactionPendingReference(s.transactionId, { ...base, referenceExternalId: s.referenceExternalId }),
       ]);
     }
     return {
-      status: 'PENDING_REFERENCE',
+      status: plan.status,
       failureCode: null,
       gameId,
       balance: wallet.balance,
-      retryCount: retry.retryCount,
-      nextRetryAt: retry.at,
+      retryCount: plan.retryCount,
+      nextRetryAt: plan.retryAt,
       updatedAt,
     };
   }
 
+  const { decision, status, failureCode } = plan;
   const entry = applyDecision(wallet, s.transactionId, decision);
   await persistWalletChanges(tx, wallet, versionBefore, entry ? [entry] : []);
-
-  const processed = decision.type === 'APPLY' || decision.type === 'NO_BALANCE_EFFECT';
-  const status: TransactionStatus = processed ? 'PROCESSED' : 'REJECTED';
-  const failureCode = decision.type === 'REJECT' ? decision.code : null;
-  assertTransition(s.fromStatus, status);
+  const processed = status === 'PROCESSED';
 
   await tx.nativeUpdate(
     WagerTransaction,
