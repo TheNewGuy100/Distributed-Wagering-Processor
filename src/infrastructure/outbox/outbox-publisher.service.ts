@@ -13,6 +13,15 @@ import { OutboxEvent } from '../persistence/entities';
 import { SqsQueues } from '../sqs/sqs-queues.service';
 import { OUTBOX_CONFIG, type OutboxConfig } from './outbox.config';
 
+interface PublishRow {
+  id: string;
+  aggregateId: string;
+  eventType: string;
+  payload: unknown;
+  attempts: number;
+  seq: bigint;
+}
+
 /** Test seam: simulate a publisher dying after the broker accepted the batch but before commit. */
 @Injectable()
 export class OutboxHooks {
@@ -108,14 +117,41 @@ export class OutboxPublisher implements OnApplicationBootstrap, BeforeApplicatio
       // Holding a head keeps every later event of that aggregate unclaimable by others, so the followers need no lock
       // of their own: they ride in the same batch, in order, which lets a hot wallet drain faster than one event per
       // cycle. A global seq order keeps an in-order prefix of every aggregate when the batch is cut at 10 entries.
-      const headSeq = new Map(heads.map((h) => [h.aggregateId, BigInt(h.seq)]));
-      const later = await tx.find(
-        OutboxEvent,
-        { aggregateId: { $in: [...headSeq.keys()] }, publishedAt: null, deadAt: null },
-        { orderBy: { seq: 'asc' } },
+      // At most (batch size - 1) followers per aggregate can ever fit in a batch, so that is all the query returns: the
+      // cost of a cycle must not grow with the backlog of a hot wallet.
+      const batch = this.config.batchSize;
+      const followers = await tx.execute<
+        { id: string; aggregate_id: string; event_type: string; payload: unknown; attempts: number; seq: string }[]
+      >(
+        `select f.id, f.aggregate_id, f.event_type, f.payload, f.attempts, f.seq
+           from jsonb_to_recordset(?::jsonb) as h(aggregate_id text, seq bigint)
+           cross join lateral (
+             select e.* from outbox_events e
+              where e.aggregate_id = h.aggregate_id and e.published_at is null and e.dead_at is null and e.seq > h.seq
+              order by e.seq limit ?
+           ) f`,
+        [JSON.stringify(heads.map((h) => ({ aggregate_id: h.aggregateId, seq: String(h.seq) }))), batch - 1],
       );
-      const followers = later.filter((r) => BigInt(r.seq) > headSeq.get(r.aggregateId)!);
-      const rows = [...heads, ...followers].sort((x, y) => (BigInt(x.seq) < BigInt(y.seq) ? -1 : 1)).slice(0, 10);
+      const rows: PublishRow[] = [
+        ...heads.map((h) => ({
+          id: h.id,
+          aggregateId: h.aggregateId,
+          eventType: h.eventType,
+          payload: h.payload,
+          attempts: h.attempts,
+          seq: BigInt(h.seq),
+        })),
+        ...followers.map((f) => ({
+          id: f.id,
+          aggregateId: f.aggregate_id,
+          eventType: f.event_type,
+          payload: f.payload,
+          attempts: f.attempts,
+          seq: BigInt(f.seq),
+        })),
+      ]
+        .sort((x, y) => (x.seq < y.seq ? -1 : 1))
+        .slice(0, batch);
       stats.claimed = rows.length;
 
       const res = await this.queues.client.send(

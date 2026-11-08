@@ -353,4 +353,32 @@ describe('outbox retry and batching', () => {
       await pub.close();
     }
   }, 30000);
+
+  test('a big backlog of one aggregate still goes out 10 at a time, oldest first (cost per cycle is measured by scripts/bench-outbox.ts)', async () => {
+    const agg = uid('hot');
+    // leftovers of earlier tests must not share the batch
+    await t.orm.em.fork().execute('update outbox_events set published_at = now() where published_at is null and dead_at is null');
+    await t.orm.em.fork().execute(
+      `insert into outbox_events (id, aggregate_id, event_type, version, payload)
+       select gen_random_uuid(), ?, 'BenchEvent', 1, '{}'::jsonb from generate_series(1, 200)`,
+      [agg],
+    );
+    const pub = await bootApp(manual);
+    const stub = stubBroker(pub, () => false);
+    try {
+      const claimed = await pub.app.get(OutboxPublisher).publishOnce();
+      expect(claimed).toBe(10);
+      const mine = stub.batches.flat().filter((e) => e.MessageGroupId === agg);
+      expect(mine).toHaveLength(10);
+      const rows = await row(agg);
+      const published = rows.filter((r) => r.published).map((r) => BigInt(r.seq));
+      expect(published).toHaveLength(10);
+      // exactly the 10 oldest
+      expect(published).toEqual(rows.slice(0, 10).map((r) => BigInt(r.seq)));
+    } finally {
+      stub.restore();
+      await t.orm.em.fork().execute("update outbox_events set published_at = now() where aggregate_id = ?", [agg]);
+      await pub.close();
+    }
+  }, 30000);
 });
