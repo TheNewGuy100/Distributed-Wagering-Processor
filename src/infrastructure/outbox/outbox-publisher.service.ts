@@ -1,15 +1,17 @@
 import { SendMessageBatchCommand } from '@aws-sdk/client-sqs';
-import { EntityManager, LockMode, raw } from '@mikro-orm/postgresql';
+import { LockMode, MikroORM, raw } from '@mikro-orm/postgresql';
 import {
   Inject,
   Injectable,
   Logger,
   type BeforeApplicationShutdown,
+  type OnApplicationShutdown,
   type OnApplicationBootstrap,
 } from '@nestjs/common';
 import { OutboxMessage } from '../../domain/outbox-message';
 import { MetricsService } from '../observability/metrics.service';
 import { OutboxEvent } from '../persistence/entities';
+import { buildOrmConfig } from '../persistence/mikro-orm.config';
 import { SqsQueues } from '../sqs/sqs-queues.service';
 import { OUTBOX_CONFIG, type OutboxConfig } from './outbox.config';
 
@@ -40,14 +42,19 @@ export class OutboxHooks {
  *  - only committed rows are visible, so nothing is published before its business commit.
  */
 @Injectable()
-export class OutboxPublisher implements OnApplicationBootstrap, BeforeApplicationShutdown {
+export class OutboxPublisher implements OnApplicationBootstrap, BeforeApplicationShutdown, OnApplicationShutdown {
   private readonly logger = new Logger(OutboxPublisher.name);
   private stopping = false;
   private loops: Promise<void>[] = [];
   private readonly wakers = new Set<() => void>();
+  /**
+   * The publisher has connections of its own. Sharing the request pool made it queue behind requests that were
+   * themselves waiting for a wallet lock: under load almost nothing was published until the traffic stopped.
+   * Created on first use (tests call `publishOnce` by hand with the loops off), closed at shutdown.
+   */
+  private ownOrm?: Promise<MikroORM>;
 
   constructor(
-    @Inject(EntityManager) private readonly em: EntityManager,
     @Inject(SqsQueues) private readonly queues: SqsQueues,
     @Inject(OUTBOX_CONFIG) private readonly config: OutboxConfig,
     @Inject(OutboxHooks) private readonly hooks: OutboxHooks,
@@ -61,6 +68,18 @@ export class OutboxPublisher implements OnApplicationBootstrap, BeforeApplicatio
     }
     this.loops = Array.from({ length: this.config.publishers }, () => this.run());
     this.logger.log(`outbox publisher started with ${this.config.publishers} loops`);
+  }
+
+  async onApplicationShutdown(): Promise<void> {
+    if (this.ownOrm) await (await this.ownOrm).close();
+  }
+
+  private connection(): Promise<MikroORM> {
+    this.ownOrm ??= MikroORM.init({
+      ...buildOrmConfig(),
+      pool: { min: 0, max: Math.max(2, this.config.publishers) },
+    });
+    return this.ownOrm;
   }
 
   async beforeApplicationShutdown(): Promise<void> {
@@ -94,7 +113,8 @@ export class OutboxPublisher implements OnApplicationBootstrap, BeforeApplicatio
   /** One claim → send → mark cycle. Returns how many rows it claimed. */
   async publishOnce(): Promise<number> {
     const stats = { claimed: 0, sent: 0, failed: 0, dead: 0 };
-    await this.em.fork().transactional(async (tx) => {
+    const orm = await this.connection();
+    await orm.em.fork().transactional(async (tx) => {
       // Heads: the first live event of each aggregate that is due (never tried, or its backoff elapsed), skipping rows
       // another publisher holds. The correlated NOT EXISTS is the one raw fragment: the query builder has no
       // vocabulary for a self-correlated anti-join. Published and DEAD events no longer hold their aggregate back.

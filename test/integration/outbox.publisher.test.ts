@@ -291,6 +291,8 @@ describe('outbox retry and batching', () => {
     );
 
   test('a refused event backs off, keeps its wallet in order, and goes DEAD after the limit without blocking it forever', async () => {
+    // leftovers of earlier tests must not share the batch (it is cut at 10 events, oldest first)
+    await t.orm.em.fork().execute('update outbox_events set published_at = now() where published_at is null and dead_at is null');
     const w = await createWallet(t, '50.00');
     await wager(t, w, { amount: '5.00' });
     const pub = await bootApp(manual);
@@ -336,6 +338,8 @@ describe('outbox retry and batching', () => {
   }, 30000);
 
   test('a hot wallet drains many events per cycle, in order', async () => {
+    // leftovers of earlier tests must not share the batch (it is cut at 10 events, oldest first)
+    await t.orm.em.fork().execute('update outbox_events set published_at = now() where published_at is null and dead_at is null');
     const w = await createWallet(t, '100.00');
     await Promise.all(Array.from({ length: 6 }, () => wager(t, w, { amount: '1.00' })));
     const pub = await bootApp(manual);

@@ -12,6 +12,7 @@ export function buildOrmConfig(env: NodeJS.ProcessEnv = process.env) {
     clientUrl: env.DATABASE_URL ?? 'postgresql://wagering:wagering@localhost:5432/wagering',
     entities,
     extensions: [Migrator],
+    pool: { min: 2, max: Number(env.DB_POOL_MAX ?? 10) },
     debug: env.ORM_QUERY_LOG === 'true' ? ['query'] : false,
     schemaGenerator: { skipTables: ['mikro_orm_migrations'] },
     migrations: {
