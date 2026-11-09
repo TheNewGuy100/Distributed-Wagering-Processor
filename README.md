@@ -221,6 +221,20 @@ build shows **7.3–10.2 s / 12.6–16.6 s**: the in-process figures were flatte
 loop throttled the request side, and the publisher competes with the requests of its own process for CPU. The honest summary
 is "a few seconds of lag at ~330 req/s on 4 shared vCPUs, draining within about 15 s of the load stopping".
 
+## Where this departs from the brief
+
+Four deliberate departures, each a design decision and not an oversight. The reasoning is in
+[ARCHITECTURE.md](ARCHITECTURE.md#where-the-service-departs-from-the-brief-on-purpose).
+
+| Brief | Here | Why |
+| --- | --- | --- |
+| `FAILED` is terminal | `FAILED` is reopened by a resend of the identical request (`PROCESSED` and `REJECTED` stay terminal) | A transient failure must not lock a transaction forever; the idempotency key still guarantees one effect. |
+| Reversals limited per reversal type | One reversal per transaction, whatever its type | A bet cannot be returned twice by a `REFUND` and then a `ROLLBACK`: stricter and safer for the player's balance. |
+| Rich `WagerTransaction` / ledger entry classes | Persisted rows, with the rules in pure domain functions (`decide`, `planSettlement`) and database constraints | Same rules, testable without a database; covered by the property test over 300 seeded random sequences. |
+| `Money.negate()` / `isNegative()` | Not provided: a negative `Money` cannot be represented | Removes a class of bugs; the direction of a movement lives in the ledger. |
+
+The first two change observable behaviour (and are the stricter, safer choice); the last two are about shape only.
+
 ## License
 
 All rights reserved. The code is public so it can be read and evaluated; no permission to use, copy, modify or
